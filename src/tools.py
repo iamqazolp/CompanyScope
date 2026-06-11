@@ -9,7 +9,7 @@ from src.embed import get_collection, MODEL_NAME
 from sentence_transformers import SentenceTransformer
 
 # Configure EDGAR identity
-identity = os.getenv("EDGAR_IDENTITY")
+identity = os.getenv("EDGAR_IDENTITY", "CompanyScope TestBot contact@example.com")
 set_identity(identity)
 
 
