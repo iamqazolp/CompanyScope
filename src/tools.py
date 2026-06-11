@@ -2,6 +2,7 @@ import os
 import re
 import ast
 import operator
+from typing import Any
 from edgar import set_identity, Company
 
 from src.embed import get_collection, MODEL_NAME
@@ -114,8 +115,8 @@ global_model = None
 
 
 def search_filings(
-    query: str, ticker: str = None, year=None, section: str = None, k: int = 3
-) -> list[dict]:
+    query: str, ticker: str | None = None, year: str | None = None, section: str | None = None, k: int = 3
+) -> list[dict[str, Any]]:
     """
     Performs a semantic search on the SEC filings ChromaDB collection. (normal rag)
     """
@@ -129,8 +130,8 @@ def search_filings(
         query_embedding = global_model.encode([query]).tolist()
 
         # Build metadata filter
-        where_clause = {}
-        conditions = []
+        where_clause: dict[str, Any] = {}
+        conditions: list[dict[str, Any]] = []
 
         if ticker:
             conditions.append({"ticker": ticker.upper()})
@@ -151,7 +152,7 @@ def search_filings(
             where=where_clause if where_clause else None,
         )
 
-        formatted_results = []
+        formatted_results: list[dict[str, Any]] = []
         if not results or not results["documents"] or not results["documents"][0]:
             return formatted_results
 

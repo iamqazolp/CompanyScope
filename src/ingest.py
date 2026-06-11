@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from bs4 import BeautifulSoup
 from edgar import set_identity, Company
+from typing import Any
 
 # Configure EDGAR identity (Required by SEC)
 # It's good practice to set identity, using a generic one for now
@@ -116,7 +117,7 @@ def chunk_text(
 ):
     """Chunks text into smaller pieces with metadata."""
     words = text.split()
-    chunks = []
+    chunks: list[dict[str, Any]] = []
 
     if not words:
         return chunks

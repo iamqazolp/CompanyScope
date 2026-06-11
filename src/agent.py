@@ -1,5 +1,6 @@
 import os
 import json
+from typing import Any
 from dotenv import load_dotenv
 from groq import Groq
 from src.tools import get_financial_data, search_filings, calculator
@@ -123,7 +124,7 @@ Please try to answer the user's question using ONLY this context. If the answer 
     ]
     try:
         response = client.chat.completions.create(
-            model=MODEL_NAME, messages=messages, timeout=30.0
+            model=MODEL_NAME, messages=messages, timeout=30.0  # type: ignore
         )
         content = response.choices[0].message.content or "{}"
         if content.strip().startswith("```"):
@@ -152,7 +153,7 @@ def process_query(question: str, ticker: str = "AAPL") -> dict:
     except Exception as e:
         return {"error": f"Failed to load system prompt: {e}"}
 
-    messages = [
+    messages: list[Any] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"Context Ticker: {ticker}\nQuestion: {question}"},
     ]
@@ -163,8 +164,8 @@ def process_query(question: str, ticker: str = "AAPL") -> dict:
         try:
             response = client.chat.completions.create(
                 model=MODEL_NAME,
-                messages=messages,
-                tools=TOOLS_LIST,
+                messages=messages,  # type: ignore
+                tools=TOOLS_LIST,  # type: ignore
                 tool_choice="auto",
                 parallel_tool_calls=False,
                 timeout=30.0,
