@@ -1,0 +1,104 @@
+- question: "What was Apple's total revenue in 2023?"
+  ticker: "AAPL"
+  expected_tools: ["get_financial_data"]
+  expected_answer_contains: "383"
+  expected_refusal: false
+  expected_clarification: false
+
+- question: "What does Apple say about supply chain risks?"
+  ticker: "AAPL"
+  expected_tools: ["search_filings"]
+  expected_answer_contains: "supply"
+  expected_refusal: false
+  expected_clarification: false
+
+- question: "Calculate Apple's revenue growth from 2022 to 2023."
+  ticker: "AAPL"
+  expected_tools: ["get_financial_data", "calculator"]
+  expected_answer_contains: ""
+  expected_refusal: false
+  expected_clarification: false
+
+- question: "What is Apple's secret car project?"
+  ticker: "AAPL"
+  expected_tools: []
+  expected_answer_contains: ""
+  expected_refusal: true
+  expected_clarification: false
+
+- question: "How was the quarter?"
+  ticker: "AAPL"
+  expected_tools: []
+  expected_answer_contains: ""
+  expected_refusal: false
+  expected_clarification: true
+
+- question: "What was the net income in 2024?"
+  ticker: "AAPL"
+  expected_tools: ["get_financial_data"]
+  expected_answer_contains: "93"
+  expected_refusal: false
+  expected_clarification: false
+
+- question: "Are there any risk factors regarding cybersecurity in 2023?"
+  ticker: "AAPL"
+  expected_tools: ["search_filings"]
+  expected_answer_contains: "cyber"
+  expected_refusal: false
+  expected_clarification: false
+
+- question: "What is the CEO's favorite food?"
+  ticker: "AAPL"
+  expected_tools: []
+  expected_answer_contains: ""
+  expected_refusal: true
+  expected_clarification: false
+
+- question: "What was the total assets in 2022?"
+  ticker: "AAPL"
+  expected_tools: ["get_financial_data"]
+  expected_answer_contains: "352"
+  expected_refusal: false
+  expected_clarification: false
+
+- question: "What were the total liabilities in 2024?"
+  ticker: "AAPL"
+  expected_tools: ["get_financial_data"]
+  expected_answer_contains: ""
+  expected_refusal: false
+  expected_clarification: false
+
+- question: "Tell me about the MD&A section for 2024."
+  ticker: "AAPL"
+  expected_tools: ["search_filings"]
+  expected_answer_contains: ""
+  expected_refusal: false
+  expected_clarification: false
+
+- question: "Calculate the difference between 2024 and 2023 net income."
+  ticker: "AAPL"
+  expected_tools: ["get_financial_data", "calculator"]
+  expected_answer_contains: ""
+  expected_refusal: false
+  expected_clarification: false
+
+- question: "What does the 10-K say about competitors in 2022?"
+  ticker: "AAPL"
+  expected_tools: ["search_filings"]
+  expected_answer_contains: "compet"
+  expected_refusal: false
+  expected_clarification: false
+
+- question: "Give me data for."
+  ticker: "AAPL"
+  expected_tools: []
+  expected_answer_contains: ""
+  expected_refusal: false
+  expected_clarification: true
+
+- question: "Did Apple mention artificial intelligence in 2024 filings?"
+  ticker: "AAPL"
+  expected_tools: ["search_filings"]
+  expected_answer_contains: ""
+  expected_refusal: false
+  expected_clarification: false

@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+chroma_db/
+data/
+.venv/
+report.json
+test_agent.py
