@@ -101,7 +101,8 @@ I wrote a set of 30 test cases in `tests/eval_data.yaml` that cover:
 
 The CI pipeline (`.github/workflows/ai-ci.yml`) starts the API, runs all tests, and fails if factual accuracy drops below 95% or refusal accuracy drops below 90%. This catches regressions from prompt changes or code updates before they reach anyone.
 
-![CI pipeline screenshot](screenshots/ci.png)
+<img width="2878" height="1618" alt="image" src="https://github.com/user-attachments/assets/c7e2c85c-5d92-4b5c-8ead-5a63296b4e56" />
+
 
 ## Project layout
 
