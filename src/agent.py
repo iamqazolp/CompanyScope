@@ -10,7 +10,7 @@ from src.guard import verify_citations
 load_dotenv()
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL_NAME = "llama-3.1-8b-instant"
+MODEL_NAME = "llama-3.3-70b-versatile"
 
 TOOLS_LIST = [
     {
