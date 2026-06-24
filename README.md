@@ -4,7 +4,7 @@
 An AI that reads SEC filings and answers financial questions with exact sources.  
 No made-up numbers. No speculation. Just citations from the data it actually sees.
 
-![Demo screenshot](demo_screenshot.png)
+<img width="2803" height="1550" alt="image" src="https://github.com/user-attachments/assets/65d9f1d7-b6ed-4235-b103-b0175dbac471" />
 
 ## What it does
 
