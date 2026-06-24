@@ -4,6 +4,9 @@ import ast
 import operator
 from typing import Any
 from edgar import set_identity, Company
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from src.embed import get_collection, MODEL_NAME
 from sentence_transformers import SentenceTransformer
@@ -115,7 +118,7 @@ global_model = None
 
 
 def search_filings(
-    query: str, ticker: str | None = None, year: str | None = None, section: str | None = None, k: int = 3
+    query: str, ticker: str | None = None, year: str | None = None, section: str | None = None, k: int | None = None
 ) -> list[dict[str, Any]]:
     """
     Performs a semantic search on the SEC filings ChromaDB collection. (normal rag)
@@ -125,7 +128,9 @@ def search_filings(
         collection = get_collection()
 
         if global_model is None:
-            global_model = SentenceTransformer(MODEL_NAME, device="cpu")
+            global_model = SentenceTransformer(MODEL_NAME, device=os.getenv("EMBEDDING_DEVICE", "cpu"))
+
+        k_limit = k if k is not None else int(os.getenv("SEARCH_RESULTS_LIMIT", 3))
 
         query_embedding = global_model.encode([query]).tolist()
 
@@ -148,7 +153,7 @@ def search_filings(
         # Execute query
         results = collection.query(
             query_embeddings=query_embedding,
-            n_results=k,
+            n_results=k_limit,
             where=where_clause if where_clause else None,
         )
 

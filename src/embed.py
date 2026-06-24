@@ -2,11 +2,16 @@ import json
 from pathlib import Path
 import chromadb
 from sentence_transformers import SentenceTransformer
+import os
+from dotenv import load_dotenv
 
-CHUNKS_FILE = Path("data/processed/chunks.jsonl")
-CHROMA_PATH = "./chroma_db"
-COLLECTION_NAME = "narratives"
-MODEL_NAME = "all-MiniLM-L6-v2"
+load_dotenv()
+
+CHUNKS_FILE = Path(os.getenv("CHUNKS_FILE", "data/processed/chunks.jsonl"))
+CHROMA_PATH = os.getenv("CHROMA_PATH", "chroma_db")
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "narratives")
+MODEL_NAME = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu")
 
 def get_collection():
     """Returns the ChromaDB collection object for querying."""
@@ -21,7 +26,7 @@ def build_index():
         return 0
 
     print("Loading model...")
-    model = SentenceTransformer(MODEL_NAME, device='cpu')
+    model = SentenceTransformer(MODEL_NAME, device=DEVICE)
     
     collection = get_collection()
     

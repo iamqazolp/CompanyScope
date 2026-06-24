@@ -10,7 +10,8 @@ from src.guard import verify_citations
 load_dotenv()
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL_NAME = "llama-3.3-70b-versatile"
+MODEL_NAME = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+TIMEOUT = float(os.getenv("GROQ_TIMEOUT", 30.0))
 
 TOOLS_LIST = [
     {
@@ -124,7 +125,7 @@ Please try to answer the user's question using ONLY this context. If the answer 
     ]
     try:
         response = client.chat.completions.create(
-            model=MODEL_NAME, messages=messages, timeout=30.0  # type: ignore
+            model=MODEL_NAME, messages=messages, timeout=TIMEOUT  # type: ignore
         )
         content = response.choices[0].message.content or "{}"
         if content.strip().startswith("```"):
@@ -168,7 +169,7 @@ def process_query(question: str, ticker: str = "AAPL") -> dict:
                 tools=TOOLS_LIST,  # type: ignore
                 tool_choice="auto",
                 parallel_tool_calls=False,
-                timeout=30.0,
+                timeout=TIMEOUT,
             )
 
             message = response.choices[0].message

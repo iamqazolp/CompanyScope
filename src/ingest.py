@@ -5,13 +5,16 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from edgar import set_identity, Company
 from typing import Any
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Configure EDGAR identity (Required by SEC)
 # It's good practice to set identity, using a generic one for now
 set_identity(os.getenv("EDGAR_IDENTITY"))
 
-RAW_DIR = Path("data/raw")
-PROCESSED_DIR = Path("data/processed")
+RAW_DIR = Path(os.getenv("RAW_DIR", "data/raw"))
+PROCESSED_DIR = Path(os.getenv("PROCESSED_DIR", "data/processed"))
 
 
 def download_filings(ticker: str, years: list[int]):
@@ -152,8 +155,9 @@ if __name__ == "__main__":
     if out_file.exists():
         out_file.unlink()
 
-    ticker = "AAPL"
-    years = [2020, 2021, 2022, 2023, 2024, 2025, 2026]
+    ticker = os.getenv("INGEST_TICKER", "AAPL")
+    years_str = os.getenv("INGEST_YEARS", "2020,2021,2022,2023,2024,2025,2026")
+    years = [int(y.strip()) for y in years_str.split(",")]
 
     print(f"Downloading filings for {ticker}...")
     html_paths = download_filings(ticker, years)
@@ -179,8 +183,8 @@ if __name__ == "__main__":
                     year=year,
                     filing_type=filing_type,
                     section=section_name,
-                    chunk_size=500,
-                    overlap=50,
+                    chunk_size=int(os.getenv("CHUNK_SIZE", 500)),
+                    overlap=int(os.getenv("CHUNK_OVERLAP", 50)),
                 )
 
                 for chunk in chunks:
