@@ -1,19 +1,24 @@
-import os
 import re
 import ast
 import operator
+import os
 from typing import Any
 from edgar import set_identity, Company
+
+from src.embed import get_collection
+from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 
+from src.config import (
+    SEARCH_RESULTS_LIMIT,
+)
+
 load_dotenv()
-
-from src.embed import get_collection, MODEL_NAME
-from sentence_transformers import SentenceTransformer
-
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu")
 # Configure EDGAR identity
-identity = os.getenv("EDGAR_IDENTITY", "CompanyScope TestBot contact@example.com")
-set_identity(identity)
+EDGAR_IDENTITY = os.getenv("EDGAR_IDENTITY")
+set_identity(EDGAR_IDENTITY)
 
 
 def get_financial_data(ticker: str, concept: str, year) -> dict:
@@ -25,9 +30,6 @@ def get_financial_data(ticker: str, concept: str, year) -> dict:
         company = Company(ticker)
         # Fetch the 10-K for the specified year
         # SEC filings for a year might be filed early the next year.
-        # But edgartools filter by filing date. Usually a 10-K for 2023 is filed in late 2023 or early 2024.
-        # To be safe, we can just get recent 10-Ks and find the one covering the year,
-        # or we just get all 10-Ks and look at their reporting period.
         filings = company.get_filings(form="10-K")
 
         # Try to find the filing whose reporting date ends in the specified year
@@ -118,7 +120,11 @@ global_model = None
 
 
 def search_filings(
-    query: str, ticker: str | None = None, year: str | None = None, section: str | None = None, k: int | None = None
+    query: str,
+    ticker: str | None = None,
+    year: str | None = None,
+    section: str | None = None,
+    k: int | None = None,
 ) -> list[dict[str, Any]]:
     """
     Performs a semantic search on the SEC filings ChromaDB collection. (normal rag)
@@ -128,9 +134,7 @@ def search_filings(
         collection = get_collection()
 
         if global_model is None:
-            global_model = SentenceTransformer(MODEL_NAME, device=os.getenv("EMBEDDING_DEVICE", "cpu"))
-
-        k_limit = k if k is not None else int(os.getenv("SEARCH_RESULTS_LIMIT", 3))
+            global_model = SentenceTransformer(EMBEDDING_MODEL, device=EMBEDDING_DEVICE)
 
         query_embedding = global_model.encode([query]).tolist()
 
@@ -153,7 +157,7 @@ def search_filings(
         # Execute query
         results = collection.query(
             query_embeddings=query_embedding,
-            n_results=k_limit,
+            n_results=k or SEARCH_RESULTS_LIMIT,
             where=where_clause if where_clause else None,
         )
 
