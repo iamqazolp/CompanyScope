@@ -1,119 +1,420 @@
-import streamlit as st
+import os
+from typing import Any
+
+import pandas as pd
 import requests
+import streamlit as st
 
-st.set_page_config(page_title="CompanyScope", layout="wide")
+st.set_page_config(
+    page_title="CompanyScope | SEC Financial Analyst",
+    page_icon="📊",
+    layout="wide",
+)
 
-st.title("CompanyScope")
-st.markdown("Ask natural language questions about public companies' financial data and SEC filings. The agent uses RAG and specialized tools to fetch exact figures and quotes.")
+DEFAULT_API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
 
-# Initialize chat history
+# Custom styling for analyst cards and badges
+st.markdown(
+    """
+    <style>
+    .metric-pill {
+        display: inline-block;
+        padding: 3px 10px;
+        margin-right: 6px;
+        margin-bottom: 6px;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        background-color: rgba(59, 130, 246, 0.14);
+        color: #60a5fa;
+        border: 1px solid rgba(59, 130, 246, 0.3);
+    }
+    .citation-card-num {
+        padding: 10px 14px;
+        border-left: 4px solid #3b82f6;
+        background-color: rgba(59, 130, 246, 0.08);
+        border-radius: 6px;
+        margin-bottom: 8px;
+    }
+    .citation-card-nar {
+        padding: 10px 14px;
+        border-left: 4px solid #10b981;
+        background-color: rgba(16, 185, 129, 0.08);
+        border-radius: 6px;
+        margin-bottom: 8px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def fetch_backend_status(base_url: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    health_data: dict[str, Any] = {}
+    index_data: dict[str, Any] = {}
+    try:
+        r_health = requests.get(f"{base_url}/health", timeout=3)
+        if r_health.ok:
+            health_data = r_health.json()
+        r_tickers = requests.get(f"{base_url}/tickers", timeout=5)
+        if r_tickers.ok:
+            index_data = r_tickers.json()
+    except Exception:
+        pass
+    return health_data, index_data
+
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "current_query" not in st.session_state:
     st.session_state.current_query = None
+if "financials_cache" not in st.session_state:
+    st.session_state.financials_cache = {}
 
-# Sidebar for configuration
+# Sidebar Configuration & Controls
 with st.sidebar:
-    st.header("Configuration")
-    ticker = st.text_input("Target Ticker Symbol", value="AAPL").upper()
-    api_url = st.text_input("FastAPI Backend URL", value="http://localhost:8000/ask")
-    st.caption("The agent will automatically use the specified ticker as context for your questions.")
-    
-    st.divider()
-    
-    st.header("Example Questions")
-    if st.button("What was the net income in 2023?"):
-        st.session_state.current_query = "What was the net income in 2023?"
-    if st.button("Summarize the risk factors from 2022."):
-        st.session_state.current_query = "Summarize the risk factors from 2022."
-        
-    st.divider()
-    
-    st.header("Trick Question")
-    st.caption("Test the agent's hallucination prevention:")
-    if st.button("What is Apple's secret AI product?"):
-        st.session_state.current_query = "What is Apple's secret AI product?"
+    st.title("📊 CompanyScope")
+    st.caption("Zero-Hallucination SEC Filing & XBRL Financial Intelligence")
 
-# Display chat messages from history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-        # Render citations if they exist
-        if message.get("citations"):
-            with st.expander("View Citations & Sources"):
-                for idx, cit in enumerate(message["citations"]):
-                    if cit.get("type") == "numeric":
-                        st.info(f"**{idx+1}. Numeric Fact:** {cit.get('concept')} for {cit.get('ticker')} in {cit.get('year')}")
-                    elif cit.get("type") == "narrative":
-                        st.success(f"**{idx+1}. SEC Filing ({cit.get('section')} - {cit.get('year')}):** \"{cit.get('quote')}\"")
+    api_base = st.text_input("Backend API Base URL", value=DEFAULT_API_BASE).rstrip("/")
+    health_info, index_info = fetch_backend_status(api_base)
 
-user_input = st.chat_input(f"Ask about {ticker}'s revenue, risk factors, or management discussion...")
-prompt = st.session_state.get("current_query") or user_input
-
-# React to user input
-if prompt:
-    st.session_state.current_query = None
-    # Display user message in chat message container
-    st.chat_message("user").markdown(prompt)
-    # Add user message to chat history
-    st.session_state.messages.append({"role": "user", "content": prompt})
-
-    # Call FastAPI backend
-    with st.chat_message("assistant"):
-        with st.spinner(f"Analyzing {ticker} filings and financials..."):
-            try:
-                response = requests.post(api_url, json={"question": prompt, "ticker": ticker})
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    
-                    if "error" in data:
-                        st.error(f"Agent encountered an error: {data['error']}")
-                        st.session_state.messages.append({"role": "assistant", "content": f"Error: {data['error']}"})
-                        
-                    elif data.get("needs_clarification"):
-                        clarification = data["needs_clarification"]
-                        st.warning(clarification)
-                        st.session_state.messages.append({"role": "assistant", "content": clarification})
-                        
-                    else:
-                        answer = data.get("answer", "No answer provided.")
-                        citations = data.get("citations", [])
-                        
-                        st.markdown(answer)
-                        
-                        if citations:
-                            with st.expander("View Citations & Sources"):
-                                for idx, cit in enumerate(citations):
-                                    if cit.get("type") == "numeric":
-                                        st.info(f"**{idx+1}. Numeric Fact:** {cit.get('concept')} for {cit.get('ticker')} in {cit.get('year')}")
-                                    elif cit.get("type") == "narrative":
-                                        st.success(f"**{idx+1}. SEC Filing ({cit.get('section')} - {cit.get('year')}):** \"{cit.get('quote')}\"")
-                                        
-                        # Add assistant response to chat history
-                        st.session_state.messages.append({
-                            "role": "assistant", 
-                            "content": answer,
-                            "citations": citations
-                        })
-                        
-                elif response.status_code == 429:
-                    error_msg = "Rate limit exceeded (10 requests/minute)! Please wait a moment."
-                    st.error(error_msg)
-                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
-                else:
-                    st.error(f"Server Error {response.status_code}: {response.text}")
-                    
-            except requests.exceptions.ConnectionError:
-                st.error(f"Failed to connect to the backend at {api_url}. Is the FastAPI server running?")
-
-if __name__ == "__main__":
-    import sys
-    from streamlit.web import cli as stcli
-    import streamlit.runtime as st_runtime
-    
-    if st_runtime.exists():
-        pass
+    if health_info.get("status") == "ok":
+        active_prov = health_info.get("provider", "openai").upper()
+        active_mod = health_info.get("model", "gpt-6-luna")
+        lf_status = " • 🔭 Langfuse Active" if health_info.get("langfuse_enabled") else ""
+        st.success(f"Backend Online • **{active_prov}** (`{active_mod}`){lf_status}")
     else:
-        sys.argv = ["streamlit", "run", sys.argv[0]]
-        sys.exit(stcli.main())
+        st.error("Backend Offline — start with `uvicorn src.app:app --reload`")
+
+    st.divider()
+
+    # Target Company & Multi-Ticker Support
+    st.subheader("🏢 Target Company")
+    indexed_tickers = list((index_info.get("tickers") or {}).keys())
+    default_ticker_str = indexed_tickers[0] if indexed_tickers else "AAPL"
+    ticker = st.text_input("Ticker Symbol", value=default_ticker_str).upper().strip()
+
+    ticker_stats = (index_info.get("tickers") or {}).get(ticker)
+    if ticker_stats:
+        yrs = ", ".join(str(y) for y in ticker_stats.get("years", []))
+        st.caption(
+            f"✅ **{ticker}** indexed: **{ticker_stats.get('chunks', 0)}** chunks "
+            f"(Years: {yrs})"
+        )
+    else:
+        st.caption(
+            f"ℹ️ **{ticker}** has no narrative chunks indexed yet. "
+            "XBRL numeric lookup works immediately; ingest filings below for narrative RAG."
+        )
+
+    with st.expander("📥 Ingest SEC Filings (On-Demand)"):
+        ingest_years = st.multiselect(
+            "Filing Years (10-K / 10-Q)",
+            options=[2020, 2021, 2022, 2023, 2024, 2025, 2026],
+            default=[2022, 2023, 2024, 2025],
+        )
+        if st.button(f"Download & Index {ticker}", use_container_width=True):
+            with st.spinner(
+                f"Downloading {ticker} SEC filings & building Hybrid + RAPTOR-lite index..."
+            ):
+                try:
+                    resp = requests.post(
+                        f"{api_base}/ingest",
+                        json={"ticker": ticker, "years": ingest_years},
+                        timeout=300,
+                    )
+                    if resp.ok and "error" not in resp.json():
+                        res_data = resp.json()
+                        st.success(
+                            f"Indexed {res_data.get('chunks_indexed', 0)} chunks "
+                            f"from {res_data.get('filings_processed', 0)} filings!"
+                        )
+                        st.rerun()
+                    else:
+                        st.error(f"Ingestion failed: {resp.text}")
+                except Exception as ex:
+                    st.error(f"Failed to connect to backend: {ex}")
+
+    st.divider()
+
+    # LLM Model Override
+    st.subheader("🧠 Model Settings")
+    provider_choice = st.selectbox(
+        "LLM Provider",
+        options=["Default (Configured)", "openai (gpt-6-luna)", "groq (llama-3.3-70b-versatile)"],
+        index=0,
+    )
+    multi_turn_enabled = st.toggle("Multi-Turn Conversation Context", value=True)
+
+    st.divider()
+
+    st.subheader("⚡ Analyst Prompt Library")
+    if st.button(f"📈 {ticker} Revenue & Growth (2022–2023)", use_container_width=True):
+        st.session_state.current_query = (
+            f"Calculate {ticker}'s revenue growth from 2022 to 2023."
+        )
+    if st.button(f"🛡️ {ticker} Supply Chain & Cyber Risks", use_container_width=True):
+        st.session_state.current_query = (
+            f"What does {ticker} say about supply chain and cybersecurity risks?"
+        )
+    if st.button(f"📑 Summarize {ticker} 2024 MD&A", use_container_width=True):
+        st.session_state.current_query = "Tell me about the MD&A section for 2024."
+    if st.button("🚫 Hallucination Guard Test", use_container_width=True):
+        st.session_state.current_query = f"What is {ticker}'s secret car project?"
+
+    if st.button("🗑️ Clear Chat History", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+
+def render_message_extras(msg: dict[str, Any]) -> None:
+    """Renders metadata pills, verified citations, and tool execution trace."""
+    used_tools = msg.get("used_tools") or []
+    citations = msg.get("citations") or []
+    tool_trace = msg.get("tool_trace") or []
+    model_used = msg.get("model")
+    latency_ms = msg.get("latency_ms")
+
+    pills_html = ""
+    if model_used:
+        pills_html += f'<span class="metric-pill">🤖 {model_used}</span>'
+    if latency_ms is not None:
+        pills_html += f'<span class="metric-pill">⏱️ {latency_ms / 1000:.1f}s</span>'
+    if used_tools:
+        pills_html += (
+            f'<span class="metric-pill">🛠️ Tools: {", ".join(used_tools)}</span>'
+        )
+    pills_html += (
+        f'<span class="metric-pill">✅ {len(citations)} Verified Citations</span>'
+    )
+    trace_url = msg.get("trace_url")
+    if trace_url:
+        pills_html += (
+            f'<a href="{trace_url}" target="_blank" style="text-decoration:none;">'
+            f'<span class="metric-pill">🔭 Langfuse Trace ↗</span></a>'
+        )
+    st.markdown(pills_html, unsafe_allow_html=True)
+
+    if citations:
+        with st.expander(f"📚 Verified Citations & Sources ({len(citations)})"):
+            for idx, cit in enumerate(citations, 1):
+                c_type = cit.get("type")
+                if c_type == "numeric":
+                    st.markdown(
+                        f'<div class="citation-card-num">'
+                        f"<strong>{idx}. XBRL Numeric Fact</strong> • "
+                        f"<code>{cit.get('ticker')}</code> | "
+                        f"Concept: <code>{cit.get('concept')}</code> | "
+                        f"Period: <strong>{cit.get('year')}</strong>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                elif c_type == "narrative":
+                    st.markdown(
+                        f'<div class="citation-card-nar">'
+                        f"<strong>{idx}. SEC Filing Quote</strong> • "
+                        f"<code>{cit.get('ticker')}</code> | "
+                        f"<strong>{cit.get('section')} ({cit.get('year')})</strong> | "
+                        f"Chunk: <code>{cit.get('chunk_id')}</code><br/>"
+                        f'<em>"{cit.get("quote")}"</em>'
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
+    if tool_trace:
+        with st.expander(f"🔍 Agent Tool Execution Trace ({len(tool_trace)} calls)"):
+            for step_idx, step in enumerate(tool_trace, 1):
+                st.markdown(
+                    f"**Step {step_idx}: `{step.get('tool')}`** — Args: `{step.get('arguments')}`"
+                )
+                st.json(step.get("result"), expanded=False)
+
+
+# Main Workspace Tabs
+tab_chat, tab_explorer = st.tabs(
+    ["💬 AI Financial Analyst", "📊 Financial Snapshot & Filing Index"]
+)
+
+with tab_chat:
+    st.markdown(
+        f"### {ticker} Research Workspace\n"
+        "Ask natural language questions about SEC 10-K/10-Q filings and structured XBRL financials. "
+        "Every numeric fact and narrative quote is verified against primary filings."
+    )
+
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            if message["role"] == "assistant" and not message.get("is_error"):
+                render_message_extras(message)
+
+    user_input = st.chat_input(
+        f"Ask about {ticker}'s revenue, margins, risk factors, MD&A, or growth calculations..."
+    )
+    prompt = st.session_state.get("current_query") or user_input
+
+    if prompt:
+        st.session_state.current_query = None
+        st.chat_message("user").markdown(prompt)
+
+        # Build multi-turn history before appending current user message
+        history_payload: list[dict[str, str]] = []
+        if multi_turn_enabled and st.session_state.messages:
+            for m in st.session_state.messages[-6:]:
+                history_payload.append(
+                    {"role": m["role"], "content": str(m["content"])}
+                )
+
+        st.session_state.messages.append({"role": "user", "content": prompt})
+
+        req_provider = None
+        req_model = None
+        if provider_choice.startswith("openai"):
+            req_provider = "openai"
+            req_model = "gpt-6-luna"
+        elif provider_choice.startswith("groq"):
+            req_provider = "groq"
+            req_model = "llama-3.3-70b-versatile"
+
+        with st.chat_message("assistant"):
+            with st.spinner(
+                f"Querying {ticker} XBRL data & Hybrid RAG filings..."
+            ):
+                try:
+                    response = requests.post(
+                        f"{api_base}/ask",
+                        json={
+                            "question": prompt,
+                            "ticker": ticker,
+                            "history": history_payload if history_payload else None,
+                            "provider": req_provider,
+                            "model": req_model,
+                        },
+                        timeout=120,
+                    )
+
+                    if response.status_code == 200:
+                        data = response.json()
+
+                        if "error" in data:
+                            err_text = f"Agent encountered an error: {data['error']}"
+                            st.error(err_text)
+                            st.session_state.messages.append(
+                                {
+                                    "role": "assistant",
+                                    "content": err_text,
+                                    "is_error": True,
+                                }
+                            )
+                        elif data.get("needs_clarification"):
+                            clarification = data["needs_clarification"]
+                            st.warning(f"**Clarification Needed:** {clarification}")
+                            assistant_entry = {
+                                "role": "assistant",
+                                "content": clarification,
+                                "citations": [],
+                                "used_tools": data.get("used_tools", []),
+                                "tool_trace": data.get("tool_trace", []),
+                                "model": data.get("model"),
+                                "latency_ms": data.get("latency_ms"),
+                                "trace_url": data.get("trace_url"),
+                            }
+                            render_message_extras(assistant_entry)
+                            st.session_state.messages.append(assistant_entry)
+                        else:
+                            answer = data.get("answer", "No answer provided.")
+                            st.markdown(answer)
+                            assistant_entry = {
+                                "role": "assistant",
+                                "content": answer,
+                                "citations": data.get("citations", []),
+                                "used_tools": data.get("used_tools", []),
+                                "tool_trace": data.get("tool_trace", []),
+                                "model": data.get("model"),
+                                "latency_ms": data.get("latency_ms"),
+                                "trace_url": data.get("trace_url"),
+                            }
+                            render_message_extras(assistant_entry)
+                            st.session_state.messages.append(assistant_entry)
+
+                    elif response.status_code == 429:
+                        error_msg = "Rate limit exceeded! Please wait a moment."
+                        st.error(error_msg)
+                        st.session_state.messages.append(
+                            {"role": "assistant", "content": error_msg, "is_error": True}
+                        )
+                    else:
+                        st.error(f"Server Error {response.status_code}: {response.text}")
+
+                except requests.exceptions.ConnectionError:
+                    st.error(
+                        f"Failed to connect to the backend at {api_base}. Is the FastAPI server running?"
+                    )
+
+with tab_explorer:
+    st.subheader(f"📈 {ticker} Multi-Year XBRL Financial Snapshot")
+    st.caption(
+        "Fetched directly from SEC EDGAR 10-K filings via `edgartools`."
+    )
+
+    col_btn, col_info = st.columns([1, 3])
+    with col_btn:
+        load_fin = st.button(
+            f"🔄 Load {ticker} Financials", use_container_width=True
+        )
+
+    if load_fin:
+        with st.spinner(f"Fetching SEC 10-K XBRL financials for {ticker}..."):
+            try:
+                r_fin = requests.get(f"{api_base}/financials/{ticker}", timeout=60)
+                if r_fin.ok and "financials" in r_fin.json():
+                    st.session_state.financials_cache[ticker] = r_fin.json()[
+                        "financials"
+                    ]
+                else:
+                    st.error(f"Could not load financials: {r_fin.text}")
+            except Exception as ex:
+                st.error(f"Error fetching financials: {ex}")
+
+    fin_rows = st.session_state.financials_cache.get(ticker)
+    if fin_rows:
+        df = pd.DataFrame(fin_rows)
+        df["year"] = df["year"].astype(str)
+        df_indexed = df.set_index("year")
+
+        chart_col1, chart_col2 = st.columns(2)
+        with chart_col1:
+            st.markdown("##### Revenue vs. Net Income (USD)")
+            cols_1 = [c for c in ["Revenue", "Net Income", "Operating Income"] if c in df_indexed.columns]
+            if cols_1:
+                st.bar_chart(df_indexed[cols_1])
+        with chart_col2:
+            st.markdown("##### Assets vs. Liabilities (USD)")
+            cols_2 = [c for c in ["Total Assets", "Total Liabilities"] if c in df_indexed.columns]
+            if cols_2:
+                st.bar_chart(df_indexed[cols_2])
+
+        st.markdown("##### Structured 10-K Financial Table (USD)")
+        st.dataframe(df_indexed, use_container_width=True)
+    else:
+        st.info(
+            f"Click **Load {ticker} Financials** above to pull multi-year 10-K XBRL metrics from EDGAR."
+        )
+
+    st.divider()
+    st.subheader("🗂️ ChromaDB Vector & BM25 Index Coverage")
+    tickers_map = index_info.get("tickers") or {}
+    if tickers_map:
+        coverage_rows = [
+            {
+                "Ticker": t,
+                "Indexed Chunks (Leaf + RAPTOR Summaries)": info.get("chunks", 0),
+                "Years Covered": ", ".join(str(y) for y in info.get("years", [])),
+                "Filing Sections": ", ".join(info.get("sections", [])),
+            }
+            for t, info in tickers_map.items()
+        ]
+        st.dataframe(pd.DataFrame(coverage_rows), use_container_width=True, hide_index=True)
+    else:
+        st.warning("No chunks currently indexed in ChromaDB.")
