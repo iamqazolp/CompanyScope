@@ -9,3 +9,4 @@ test_agent.py
 test_guard.py
 test_query.py
 test_search_tool.py
+.agents/
