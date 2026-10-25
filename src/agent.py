@@ -11,6 +11,10 @@ from groq import Groq
 
 from src.config import (
     DEFAULT_TICKER,
+    GPT6_LUNA_CACHE_WRITE_PRICE_PER_1M,
+    GPT6_LUNA_CACHED_INPUT_PRICE_PER_1M,
+    GPT6_LUNA_INPUT_PRICE_PER_1M,
+    GPT6_LUNA_OUTPUT_PRICE_PER_1M,
     GROQ_API_KEY,
     GROQ_MODEL,
     GROQ_TIMEOUT,
@@ -22,8 +26,9 @@ from src.config import (
     OPENAI_KEY,
     OPENAI_MODEL,
     OPENAI_URL,
+    propagate_trace_attributes,
 )
-from src.guard import verify_citations
+from src.guard import check_citations, verify_citations
 from src.tools import calculator, get_financial_data, search_filings
 
 _groq_client: Groq | None = None
@@ -77,6 +82,128 @@ def _obs_context(lf: Any, **kwargs: Any) -> Any:
         except Exception:
             return nullcontext(None)
     return nullcontext(None)
+
+
+def get_model_pricing(model_name: str = "gpt-6-luna") -> dict[str, float]:
+    """Loads per-1M-token USD pricing for a model from src/model_pricing.json, falling back to config defaults."""
+    pricing_path = os.path.join(os.path.dirname(__file__), "model_pricing.json")
+    if os.path.exists(pricing_path):
+        try:
+            with open(pricing_path, "r", encoding="utf-8") as f:
+                registry = json.load(f)
+            entry = registry.get(model_name) or registry.get(model_name.lower())
+            if isinstance(entry, dict):
+                return {
+                    "input_per_1m": float(
+                        entry.get("input_per_1m", GPT6_LUNA_INPUT_PRICE_PER_1M)
+                    ),
+                    "cached_input_per_1m": float(
+                        entry.get(
+                            "cached_input_per_1m", GPT6_LUNA_CACHED_INPUT_PRICE_PER_1M
+                        )
+                    ),
+                    "cache_write_per_1m": float(
+                        entry.get(
+                            "cache_write_per_1m", GPT6_LUNA_CACHE_WRITE_PRICE_PER_1M
+                        )
+                    ),
+                    "output_per_1m": float(
+                        entry.get("output_per_1m", GPT6_LUNA_OUTPUT_PRICE_PER_1M)
+                    ),
+                }
+        except Exception:
+            pass
+    return {
+        "input_per_1m": GPT6_LUNA_INPUT_PRICE_PER_1M,
+        "cached_input_per_1m": GPT6_LUNA_CACHED_INPUT_PRICE_PER_1M,
+        "cache_write_per_1m": GPT6_LUNA_CACHE_WRITE_PRICE_PER_1M,
+        "output_per_1m": GPT6_LUNA_OUTPUT_PRICE_PER_1M,
+    }
+
+
+def compute_gpt6_luna_usage_and_cost(
+    raw_usage: dict[str, Any] | None,
+    fallback_input_text: str = "",
+    fallback_output_text: str = "",
+    model_name: str = "gpt-6-luna",
+) -> tuple[dict[str, int], dict[str, float]]:
+    """
+    Converts provider usage into Langfuse mutually-exclusive usage_details buckets and
+    computes exact USD cost_details using the pricing registry in src/model_pricing.json.
+    """
+    rates = get_model_pricing(model_name)
+    usage = raw_usage or {}
+    prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    completion_tokens = int(
+        usage.get("completion_tokens") or usage.get("output_tokens") or 0
+    )
+
+    prompt_details = usage.get("prompt_tokens_details") or {}
+    if not isinstance(prompt_details, dict):
+        prompt_details = {}
+
+    cached_tokens = int(
+        prompt_details.get("cached_tokens")
+        or usage.get("cache_read_input_tokens")
+        or usage.get("input_cached_tokens")
+        or 0
+    )
+    cache_write_tokens = int(
+        prompt_details.get("cache_write_tokens")
+        or prompt_details.get("cache_creation_tokens")
+        or usage.get("cache_creation_input_tokens")
+        or usage.get("cache_write_tokens")
+        or 0
+    )
+
+    if prompt_tokens == 0 and fallback_input_text:
+        prompt_tokens = max(1, len(fallback_input_text) // 4)
+    if completion_tokens == 0 and fallback_output_text:
+        completion_tokens = max(1, len(fallback_output_text) // 4)
+
+    # Convert inclusive prompt_tokens into mutually exclusive buckets per Langfuse contract
+    non_cached_input = max(0, prompt_tokens - cached_tokens - cache_write_tokens)
+    total_tokens = (
+        non_cached_input + cached_tokens + cache_write_tokens + completion_tokens
+    )
+
+    usage_details: dict[str, int] = {
+        "input": non_cached_input,
+        "output": completion_tokens,
+        "total": total_tokens,
+    }
+    if cached_tokens > 0:
+        usage_details["input_cached_tokens"] = cached_tokens
+    if cache_write_tokens > 0:
+        usage_details["cache_write_tokens"] = cache_write_tokens
+
+    input_cost = round(
+        non_cached_input * (rates["input_per_1m"] / 1_000_000.0), 10
+    )
+    cached_cost = round(
+        cached_tokens * (rates["cached_input_per_1m"] / 1_000_000.0), 10
+    )
+    cache_write_cost = round(
+        cache_write_tokens * (rates["cache_write_per_1m"] / 1_000_000.0), 10
+    )
+    output_cost = round(
+        completion_tokens * (rates["output_per_1m"] / 1_000_000.0), 10
+    )
+    total_cost = round(
+        input_cost + cached_cost + cache_write_cost + output_cost, 10
+    )
+
+    cost_details: dict[str, float] = {
+        "input": input_cost,
+        "output": output_cost,
+        "total": total_cost,
+    }
+    if cached_tokens > 0:
+        cost_details["input_cached_tokens"] = cached_cost
+    if cache_write_tokens > 0:
+        cost_details["cache_write_tokens"] = cache_write_cost
+
+    return usage_details, cost_details
 
 
 TOOLS_LIST: list[dict[str, Any]] = [
@@ -197,13 +324,16 @@ def _call_llm(
     use_tools: bool = True,
     provider: str | None = None,
     model: str | None = None,
+    tools_override: list[dict[str, Any]] | None = None,
+    obs_name: str = "llm_chat_completion",
 ) -> tuple[dict[str, Any], str]:
     """
     Calls the configured LLM provider (OpenAI-compatible endpoint with gpt-6-luna by default,
-    or Groq) and records a child generation in Langfuse when active.
+    or Groq) and records a child generation in Langfuse with exact usage_details and cost_details.
     """
     active_provider = (provider or LLM_PROVIDER).lower()
     lf = _get_langfuse()
+    active_tools = tools_override if tools_override is not None else TOOLS_LIST
 
     if active_provider == "openai" and OPENAI_KEY:
         active_model = model or OPENAI_MODEL
@@ -213,8 +343,8 @@ def _call_llm(
             "messages": messages,
             "temperature": 0.0,
         }
-        if use_tools:
-            payload["tools"] = TOOLS_LIST
+        if use_tools and active_tools:
+            payload["tools"] = active_tools
             payload["tool_choice"] = "auto"
 
         session = _get_http_session()
@@ -222,9 +352,10 @@ def _call_llm(
         with _obs_context(
             lf,
             as_type="generation",
-            name="llm_chat_completion",
+            name=obs_name,
             model=active_model,
             input=messages,
+            model_parameters={"temperature": 0.0, "use_tools": use_tools},
         ) as gen:
             for attempt in range(2):
                 try:
@@ -240,13 +371,30 @@ def _call_llm(
                     resp.raise_for_status()
                     data = resp.json()
                     msg = data["choices"][0]["message"]
-                    result_msg = {
+                    raw_usage = data.get("usage")
+                    result_msg: dict[str, Any] = {
                         "content": msg.get("content") or "",
                         "tool_calls": msg.get("tool_calls") or [],
                     }
+                    usage_details, cost_details = compute_gpt6_luna_usage_and_cost(
+                        raw_usage,
+                        fallback_input_text=json.dumps(messages),
+                        fallback_output_text=json.dumps(result_msg),
+                        model_name=active_model,
+                    )
+                    result_msg["_usage_details"] = usage_details
+                    result_msg["_cost_details"] = cost_details
+
                     if gen is not None:
                         try:
-                            gen.update(output=result_msg)
+                            gen.update(
+                                output={
+                                    "content": result_msg["content"],
+                                    "tool_calls": result_msg["tool_calls"],
+                                },
+                                usage_details=usage_details,
+                                cost_details=cost_details,
+                            )
                         except Exception:
                             pass
                     return result_msg, active_model
@@ -269,15 +417,15 @@ def _call_llm(
         "timeout": GROQ_TIMEOUT,
         "temperature": 0.0,
     }
-    if use_tools:
-        kwargs["tools"] = TOOLS_LIST
+    if use_tools and active_tools:
+        kwargs["tools"] = active_tools
         kwargs["tool_choice"] = "auto"
         kwargs["parallel_tool_calls"] = False
 
     with _obs_context(
         lf,
         as_type="generation",
-        name="llm_chat_completion",
+        name=obs_name,
         model=active_model,
         input=messages,
     ) as gen:
@@ -300,9 +448,30 @@ def _call_llm(
             "content": message.content or "",
             "tool_calls": normalized_tool_calls,
         }
+        raw_groq_usage = None
+        if getattr(response, "usage", None) is not None:
+            raw_groq_usage = {
+                "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
+                "completion_tokens": getattr(response.usage, "completion_tokens", 0),
+            }
+        usage_details, cost_details = compute_gpt6_luna_usage_and_cost(
+            raw_groq_usage,
+            fallback_input_text=json.dumps(messages),
+            fallback_output_text=json.dumps(result_msg),
+            model_name=active_model,
+        )
+        result_msg["_usage_details"] = usage_details
+        result_msg["_cost_details"] = cost_details
         if gen is not None:
             try:
-                gen.update(output=result_msg)
+                gen.update(
+                    output={
+                        "content": result_msg["content"],
+                        "tool_calls": result_msg["tool_calls"],
+                    },
+                    usage_details=usage_details,
+                    cost_details=cost_details,
+                )
             except Exception:
                 pass
         return result_msg, active_model
@@ -349,6 +518,7 @@ Please try to answer the user's question using ONLY this context. If the answer 
         parsed = verify_citations(parsed, mock_history)
         parsed["used_tools"] = ["search_filings"]
         parsed["model"] = active_model
+        parsed["cost_usd"] = (msg.get("_cost_details") or {}).get("total", 0.0)
         return parsed
     except Exception as e:
         return {"error": f"Fallback RAG failed: {str(e)}"}
@@ -360,10 +530,12 @@ def process_query(
     history: list[dict[str, str]] | None = None,
     provider: str | None = None,
     model: str | None = None,
+    session_id: str | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Process query using LLM and tools with multi-turn support, citation verification,
-    and full Langfuse v4 tracing (root span, LLM generations, and tool execution spans).
+    self-correction loop on guard failure, and full Langfuse v4 tracing + cost tracking.
     """
     start_time = time.time()
     ticker = (ticker or DEFAULT_TICKER).upper().strip()
@@ -391,6 +563,8 @@ def process_query(
     tool_results_history: dict[str, Any] = {}
     used_tools: list[str] = []
     tool_trace: list[dict[str, Any]] = []
+    self_correction_count = 0
+    total_cost_usd = 0.0
     active_model_used = model or (
         OPENAI_MODEL if LLM_PROVIDER == "openai" else GROQ_MODEL
     )
@@ -400,22 +574,32 @@ def process_query(
 
     with _obs_context(
         lf,
+        as_type="agent",
         name="companyscope_query",
-        input={"question": question, "ticker": ticker, "history": history},
-    ) as root_span:
+        input={"question": question, "ticker": ticker},
+    ) as root_span, propagate_trace_attributes(
+        lf,
+        session_id=session_id,
+        user_id=user_id,
+        tags=["company-scope", "single-agent", f"ticker:{ticker}"],
+        trace_name="companyscope_query",
+    ):
         if lf is not None:
             try:
                 trace_url = lf.get_trace_url()
             except Exception:
                 trace_url = None
 
-        for _iteration in range(5):
+        for _iteration in range(6):
             try:
                 message, active_model_used = _call_llm(
                     messages=messages,
                     use_tools=True,
                     provider=provider,
                     model=model,
+                )
+                total_cost_usd += float(
+                    (message.get("_cost_details") or {}).get("total", 0.0)
                 )
 
                 tool_calls = message.get("tool_calls") or []
@@ -443,8 +627,12 @@ def process_query(
                         except json.JSONDecodeError:
                             func_args = {}
 
+                        obs_type = (
+                            "retriever" if func_name == "search_filings" else "tool"
+                        )
                         with _obs_context(
                             lf,
+                            as_type=obs_type,
                             name=f"tool:{func_name}",
                             input=func_args,
                         ) as tool_span:
@@ -491,10 +679,62 @@ def process_query(
                             k in parsed
                             for k in ["answer", "citations", "needs_clarification"]
                         ):
+                            _valid_cits, invalid_cits = check_citations(
+                                parsed, tool_results_history
+                            )
+                            if invalid_cits and self_correction_count < 1:
+                                self_correction_count += 1
+                                with _obs_context(
+                                    lf,
+                                    as_type="guardrail",
+                                    name="guard:self_correction",
+                                    input={"invalid_citations": invalid_cits},
+                                ) as sc_span:
+                                    if sc_span is not None:
+                                        try:
+                                            sc_span.update(
+                                                output={
+                                                    "status": "re-prompting_agent_to_fix_citations"
+                                                }
+                                            )
+                                        except Exception:
+                                            pass
+
+                                tool_trace.append(
+                                    {
+                                        "tool": "citation_guard_self_correction",
+                                        "arguments": {
+                                            "attempt": self_correction_count
+                                        },
+                                        "result": {
+                                            "invalid_citations": invalid_cits
+                                        },
+                                    }
+                                )
+                                messages.append(
+                                    {"role": "assistant", "content": content}
+                                )
+                                messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "CITATION GUARD VERIFICATION FAILED for the following citations:\n"
+                                            f"{json.dumps(invalid_cits, indent=2)}\n\n"
+                                            "Please self-correct your JSON output immediately:\n"
+                                            "1. Every narrative 'quote' MUST be an exact, contiguous verbatim substring copied character-for-character from the retrieved chunk_text in tool results.\n"
+                                            "2. Every numeric citation MUST match a concept and year fetched via get_financial_data, and its exact digits must appear in your 'answer'.\n"
+                                            "3. Drop any unverified citation or replace its quote with an exact verbatim substring from chunk_text. Output ONLY the corrected JSON object."
+                                        ),
+                                    }
+                                )
+                                continue
+
                             parsed = verify_citations(parsed, tool_results_history)
                             parsed["used_tools"] = list(dict.fromkeys(used_tools))
                             parsed["tool_trace"] = tool_trace
+                            parsed["self_corrections"] = self_correction_count
                             parsed["model"] = active_model_used
+                            parsed["cost_usd"] = round(total_cost_usd, 6)
                             parsed["latency_ms"] = round(
                                 (time.time() - start_time) * 1000
                             )
@@ -503,7 +743,14 @@ def process_query(
 
                             if root_span is not None:
                                 try:
-                                    root_span.update(output=parsed)
+                                    root_span.update(
+                                        output={
+                                            "answer": parsed.get("answer"),
+                                            "citations": parsed.get("citations"),
+                                            "used_tools": parsed.get("used_tools"),
+                                            "cost_usd": parsed.get("cost_usd"),
+                                        }
+                                    )
                                 except Exception:
                                     pass
                             if lf is not None:
@@ -600,7 +847,7 @@ def process_query(
             question,
             ticker,
             system_prompt,
-            "Max iterations (5) reached without a final answer.",
+            "Max iterations (6) reached without a final answer.",
             provider=provider,
             model=model,
         )

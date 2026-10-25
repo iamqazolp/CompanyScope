@@ -1,102 +1,204 @@
 # CompanyScope
 
-An AI financial analyst that reads SEC filings and XBRL financial statements to answer questions with exact, verified sources.  
-No made-up numbers. No speculation. Every numeric fact and narrative quote is verified against primary filings.
+**Zero-Hallucination Multi-Agent Financial Analyst for SEC Filings & XBRL Data**
 
-<img width="2803" height="1550" alt="image" src="https://github.com/user-attachments/assets/65d9f1d7-b6ed-4235-b103-b0175dbac471" />
+CompanyScope is an agentic financial research platform that reads primary SEC `10-K` and `10-Q` filings and authoritative XBRL financial statements to answer complex equity research questions with **100% verified citations**. Every numeric figure is cross-checked against structured SEC EDGAR XBRL facts, and every narrative claim is fuzzy-verified against primary filing text before reaching the user.
 
-## What it does
+<img width="2803" height="1550" alt="CompanyScope Analyst Workspace" src="https://github.com/user-attachments/assets/65d9f1d7-b6ed-4235-b103-b0175dbac471" />
 
-Ask a question about any public company (e.g., `"Calculate Apple's revenue growth from 2022 to 2023"` or `"What does Apple say about supply chain and cybersecurity risks?"`) and the system:
+---
 
-- **Fetches exact XBRL figures** directly from SEC EDGAR (`edgartools`) for numeric lookups (Revenue, Net Income, Operating Income, Assets, Liabilities, Equity, Cash Flows)
-- **Searches narrative sections & inline tables** of 10-K and 10-Q filings using **Hybrid RAG** (Dense `all-MiniLM-L6-v2` embeddings + BM25 lexical search with Reciprocal Rank Fusion) and **RAPTOR-lite hierarchical section summaries**
-- **Executes exact arithmetic** via an AST-validated `calculator` tool
-- **Verifies every citation** via `src/guard.py`: narrative quotes are checked against retrieved filing chunks and numeric citations are validated against fetched XBRL values
-- **Supports multi-turn conversations & on-demand multi-ticker ingestion** via the FastAPI backend and Streamlit Analyst Workspace
+## Key Capabilities
 
-## Architecture
+- **Native Multi-Agent Supervisor (`src/multi_agent.py`)**
+  - Classifies user queries into `QUANT_ONLY`, `QUAL_ONLY`, or `HYBRID` execution plans.
+  - Dispatches specialized **Quantitative** (`get_financial_data` + AST `calculator`) and **Qualitative** (`search_filings` Hybrid RAG) sub-agents concurrently via `ThreadPoolExecutor`.
+  - Supports **Multi-Company Peer Comparison** (e.g., comparing `AAPL` vs. `MSFT` margins and supply-chain risks in parallel).
+- **Hybrid RAG + RAPTOR-Lite Filing Retrieval (`src/ingest.py`, `src/embed.py`, `src/tools.py`)**
+  - Extracts narrative sections (`Item 1`, `Item 1A`, `Item 7`, `Item 7A`, and 10-Q `Item 2`) while preserving compact financial/segment HTML tables as inline Markdown.
+  - Builds both granular leaf chunks (`chunk_level="leaf"`) and hierarchical **RAPTOR-lite section summary nodes** (`chunk_level="summary"`).
+  - Combines **ChromaDB** dense vector embeddings (`all-MiniLM-L6-v2`) with **`rank-bm25`** lexical search via **Reciprocal Rank Fusion (RRF)**.
+- **Authoritative XBRL Pipeline & Exact Arithmetic (`src/tools.py`)**
+  - Pulls official `10-K` balance sheet, income statement, and cash flow statement metrics directly from SEC EDGAR via `edgartools`.
+  - Performs deterministic growth, margin, and ratio calculations via an AST-validated `calculator` tool—never relying on LLM mental math.
+- **Self-Correcting Citation Guard (`src/guard.py`)**
+  - Validates every `[10-K YYYY, Section]` quote using `rapidfuzz` (`token_set_ratio` / `partial_ratio`) and every `[XBRL 10-K YYYY]` number against fetched XBRL values.
+  - If any citation fails verification, the agent automatically enters a **self-correction retry loop** with exact failure feedback before returning an answer.
+- **Langfuse v4 Observability & Cost Management (`src/config.py`, `scripts/manage_model_pricing.py`)**
+  - Full OpenTelemetry hierarchical tracing across `agent`, `generation`, `retriever`, `tool`, and `guardrail` spans.
+  - Built-in model pricing registry (`src/model_pricing.json`) with tiered token accounting (`input`, `input_cached_tokens`, `cache_write_tokens`, `output`) and an interactive CLI to sync custom models and backfill historical Langfuse traces.
 
-![Architecture diagram](agentic_loop_architecture.png)
+---
 
-1. **Structured XBRL Pipeline (`src/tools.py`)**: Pulls authoritative 10-K financial figures directly from SEC EDGAR via `edgartools`.
-2. **Hybrid RAG + RAPTOR-lite Ingestion (`src/ingest.py`, `src/embed.py`)**:
-   - Extracts narrative sections (`Item 1`, `Item 1A`, `Item 7`, `Item 7A`, and 10-Q `Item 2`) while preserving compact inline financial/segment tables as Markdown.
-   - Builds both granular leaf chunks and **RAPTOR-lite section overview nodes** (`chunk_level="summary"`) composed of verbatim lead sentences across section clusters.
-   - Retrieves chunks using **Reciprocal Rank Fusion (RRF)** over ChromaDB dense vector search + `rank-bm25` lexical search.
-3. **Multi-Provider Agent Loop (`src/agent.py`)**:
-   - Supports OpenAI-compatible endpoints (`gpt-6-luna` via `OPENAI_URL` / `OPENAI_KEY`) as well as Groq (`llama-3.3-70b-versatile`) with automatic fallback, multi-turn history, tool execution traces, and optional **Langfuse** observability.
-4. **Citation Guard (`src/guard.py`)**:
-   - Validates every numeric and narrative citation before returning the response.
+## System Architecture
 
-## Tech Stack
+```mermaid
+flowchart TD
+    User["Analyst Query (Single Ticker or Peer Comparison)"] --> API["FastAPI Backend (/ask)"]
+    API --> Mode{"Orchestration Mode"}
 
-- **Backend**: Python 3.11+, FastAPI, Uvicorn, SlowAPI
-- **LLM Providers**: OpenAI-compatible API (`gpt-6-luna`) & Groq (`llama-3.3-70b-versatile`)
-- **Retrieval**: ChromaDB (dense vectors) + `sentence-transformers` (`all-MiniLM-L6-v2`) + `rank-bm25` (lexical BM25) + Reciprocal Rank Fusion
-- **Financial Data**: `edgartools` + `BeautifulSoup4`
-- **Verification & Observability**: `rapidfuzz` citation guard + `langfuse` tracing
-- **Frontend**: Streamlit Analyst Dashboard (multi-turn chat, live tool trace inspector, on-demand SEC ingestion, XBRL financial charts)
-- **DevOps & Quality**: Docker & Docker Compose, GitHub Actions CI, Pytest evaluation suite, Ruff, MyPy
+    Mode -- "mode = multi" --> Sup["Supervisor Router (QUANT_ONLY | QUAL_ONLY | HYBRID)"]
+    Mode -- "mode = single" --> Single["Unified ReAct Agent (src/agent.py)"]
+
+    Sup --> Pool["Concurrent ThreadPoolExecutor (Per Ticker & Sub-Agent)"]
+    Pool --> Quant["Quant Sub-Agent (XBRL + AST Calculator)"]
+    Pool --> Qual["Qual Sub-Agent (Hybrid RAG + RAPTOR-lite)"]
+
+    Quant --> XBRL["SEC EDGAR XBRL (edgartools)"]
+    Quant --> Calc["AST Safe Calculator"]
+    Qual --> RRF["Hybrid Retriever (ChromaDB Dense + BM25 RRF)"]
+
+    Single --> XBRL
+    Single --> Calc
+    Single --> RRF
+
+    Quant --> Synth["Supervisor Synthesizer"]
+    Qual --> Synth
+    Single --> Guard["Citation Guard (src/guard.py)"]
+    Synth --> Guard
+
+    Guard -- "Failed Citations (Self-Correction)" --> Synth
+    Guard -- "100% Verified" --> Output["Verified Answer + Sub-Agent Reports + Langfuse v4 Trace"]
+```
+
+---
+
+## Project Structure
+
+```text
+company-scope/
+├── src/
+│   ├── app.py                 # FastAPI server (/health, /tickers, /ingest, /financials, /ask)
+│   ├── agent.py               # Single-agent tool-calling loop with Citation Guard retry
+│   ├── multi_agent.py         # Multi-Agent Supervisor (concurrent Quant/Qual + peer comparison)
+│   ├── tools.py               # XBRL lookup, Hybrid RAG (ChromaDB + BM25 RRF), AST calculator
+│   ├── guard.py               # RapidFuzz narrative & XBRL numeric citation verifier
+│   ├── ingest.py              # SEC EDGAR 10-K/10-Q parser, inline Markdown tables, RAPTOR-lite
+│   ├── embed.py               # ChromaDB indexer with deterministic chunk IDs
+│   ├── config.py              # Unified settings, Langfuse v4 helpers, and cost computation
+│   ├── prompts.py             # Grounded financial analyst system prompts
+│   └── model_pricing.json     # Per-1M token pricing registry (input, cached, cache write, output)
+├── scripts/
+│   ├── manage_model_pricing.py # CLI/interactive tool to update model rates & backfill Langfuse
+│   ├── backfill_langfuse_costs.py
+│   └── check_thresholds.py    # CI evaluation pass-rate gate (>= 90%)
+├── tests/
+│   └── test_eval.py           # End-to-end golden evaluation benchmark (15 test cases)
+├── streamlit_app.py           # Streamlit Analyst Workspace UI
+├── Dockerfile                 # Multi-service container image
+├── docker-compose.yml         # FastAPI + Streamlit orchestration
+└── Makefile                   # Developer workflow shortcuts
+```
+
+---
 
 ## Quickstart
 
-### 1. Clone and install dependencies
+### 1. Clone & Install Dependencies
 ```bash
 git clone https://github.com/iamqazolp/CompanyScope.git
 cd company-scope
 uv sync
 ```
 
-### 2. Configure `.env`
-Create a `.env` file in the project root:
+### 2. Configure Environment Variables (`.env`)
+Create a `.env` file in the repository root:
 ```env
+# Primary OpenAI-compatible LLM endpoint
 OPENAI_URL=https://api.shopaikey.com
-OPENAI_KEY=your_openai_key_here
+OPENAI_KEY=your_openai_api_key
 OPENAI_MODEL=gpt-6-luna
-GROQ_API_KEY=gsk_your_groq_key_here
+
+# Fallback / alternative provider (Groq)
+GROQ_API_KEY=gsk_your_groq_key
+
+# SEC EDGAR identity (required by SEC fair-access policy)
 EDGAR_IDENTITY=your_email@example.com
 DEFAULT_TICKER=AAPL
+
+# Optional: Langfuse v4 Observability
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://us.cloud.langfuse.com
 ```
 
-### 3. Ingest SEC filings & build the Hybrid + RAPTOR-lite index
+### 3. Ingest SEC Filings & Build the Hybrid Index
 ```bash
-python -m src.ingest
-python -m src.embed
+make ingest   # Downloads 10-K/10-Q filings and builds RAPTOR-lite + leaf chunks
+make embed    # Indexes chunks into ChromaDB
 ```
 
-### 4. Start the FastAPI server and Streamlit Analyst Dashboard
+### 4. Launch the Backend & Analyst Workspace
 ```bash
-uvicorn src.app:app --reload
-```
-In a second terminal:
-```bash
-streamlit run streamlit_app.py
+# Terminal 1 — FastAPI Backend (http://localhost:8000)
+make run-api
+
+# Terminal 2 — Streamlit Analyst Dashboard (http://localhost:8501)
+make run-ui
 ```
 
-Or run everything with **Docker Compose**:
+Or run both services via **Docker Compose**:
 ```bash
 docker compose up --build
 ```
 
-## API Endpoints
+---
 
-- `GET /health` — Backend health, active LLM provider, and model name
-- `GET /tickers` — Summary of indexed tickers, chunk counts, years, and sections in ChromaDB
-- `POST /ingest` — Download 10-K/10-Q filings for any ticker and index them into ChromaDB on demand
-- `GET /financials/{ticker}` — Multi-year structured 10-K XBRL metrics for charts and tables
-- `POST /ask` — Ask a financial question (supports `question`, `ticker`, `history`, `provider`, `model`)
+## API Reference
 
-## Evaluation & CI
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/health` | Active LLM provider, model, and service status |
+| `GET` | `/tickers` | Indexed tickers, chunk counts, filing years, and sections in ChromaDB |
+| `POST` | `/ingest` | On-demand SEC EDGAR download (`10-K`/`10-Q`) and ChromaDB indexing for any ticker |
+| `GET` | `/financials/{ticker}` | Multi-year structured `10-K` XBRL financial metrics for charting |
+| `POST` | `/ask` | Run a single-agent or multi-agent query across one or more tickers |
 
-Run linting, type-checking, and the automated evaluation benchmark:
-```bash
-ruff check .
-mypy src/ --ignore-missing-imports
-pytest tests/test_eval.py -v --json-report --json-report-file=report.json
-python scripts/check_thresholds.py report.json
+### Example `POST /ask` Request (Multi-Agent Peer Comparison)
+```json
+{
+  "question": "Compare revenue growth and key supply chain risks between Apple and Microsoft.",
+  "ticker": "AAPL",
+  "tickers": ["AAPL", "MSFT"],
+  "mode": "multi",
+  "provider": "openai"
+}
 ```
 
 ---
 
-Built by Dang Quan
+## Model Pricing & Langfuse Cost Backfill
+
+CompanyScope includes a CLI and interactive wizard ([`scripts/manage_model_pricing.py`](scripts/manage_model_pricing.py)) to manage custom model token rates in [`src/model_pricing.json`](src/model_pricing.json), sync them to Langfuse, and backfill historical `GENERATION` observations via OpenTelemetry OTLP:
+
+```bash
+# Interactive wizard
+make pricing
+
+# Non-interactive CLI update + historical backfill
+python -m scripts.manage_model_pricing \
+  --model gpt-6-luna \
+  --input 0.10 \
+  --cached-input 0.01 \
+  --cache-write 0.125 \
+  --output 0.50 \
+  --backfill
+
+# List all configured models and pricing tiers
+python -m scripts.manage_model_pricing --list
+```
+
+---
+
+## Evaluation & Quality Checks
+
+Run Ruff linting, MyPy static type checking, and the 15-case golden evaluation suite:
+
+```bash
+make lint
+make eval
+```
+
+---
+
+Built by **Dang Quan**
