@@ -13,7 +13,6 @@ st.set_page_config(
 
 DEFAULT_API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
 
-# Custom styling for analyst cards and badges
 st.markdown(
     """
     <style>
@@ -71,7 +70,6 @@ if "current_query" not in st.session_state:
 if "financials_cache" not in st.session_state:
     st.session_state.financials_cache = {}
 
-# Sidebar Configuration & Controls
 with st.sidebar:
     st.title("📊 CompanyScope")
     st.caption("Zero-Hallucination SEC Filing & XBRL Financial Intelligence")
@@ -89,11 +87,15 @@ with st.sidebar:
 
     st.divider()
 
-    # Target Company & Multi-Ticker Support
-    st.subheader("🏢 Target Company")
+    st.subheader("🏢 Target Companies")
     indexed_tickers = list((index_info.get("tickers") or {}).keys())
     default_ticker_str = indexed_tickers[0] if indexed_tickers else "AAPL"
-    ticker = st.text_input("Ticker Symbol", value=default_ticker_str).upper().strip()
+    ticker = st.text_input("Primary Ticker Symbol", value=default_ticker_str).upper().strip()
+    peer_tickers_input = st.text_input(
+        "Peer Comparison Tickers (optional, comma-separated)",
+        value="",
+        placeholder="e.g. MSFT, NVDA",
+    )
 
     ticker_stats = (index_info.get("tickers") or {}).get(ticker)
     if ticker_stats:
@@ -138,11 +140,23 @@ with st.sidebar:
 
     st.divider()
 
-    # LLM Model Override
-    st.subheader("🧠 Model Settings")
+    st.subheader("🧠 Agent & Model Settings")
+    agent_mode_label = st.selectbox(
+        "Orchestration Mode",
+        options=[
+            "Auto (Multi-Agent on Peer Queries)",
+            "Multi-Agent Supervisor (Parallel Quant + Qual Sub-Agents)",
+            "Single Agent",
+        ],
+        index=0,
+    )
     provider_choice = st.selectbox(
         "LLM Provider",
-        options=["Default (Configured)", "openai (gpt-6-luna)", "groq (llama-3.3-70b-versatile)"],
+        options=[
+            "Default (Configured)",
+            "openai (gpt-6-luna)",
+            "groq (llama-3.3-70b-versatile)",
+        ],
         index=0,
     )
     multi_turn_enabled = st.toggle("Multi-Turn Conversation Context", value=True)
@@ -150,6 +164,10 @@ with st.sidebar:
     st.divider()
 
     st.subheader("⚡ Analyst Prompt Library")
+    if st.button("🤝 Compare AAPL vs MSFT 2023 Revenue", use_container_width=True):
+        st.session_state.current_query = (
+            "Compare Apple (AAPL) and Microsoft (MSFT) total revenue and net income in 2023."
+        )
     if st.button(f"📈 {ticker} Revenue & Growth (2022–2023)", use_container_width=True):
         st.session_state.current_query = (
             f"Calculate {ticker}'s revenue growth from 2022 to 2023."
@@ -158,8 +176,6 @@ with st.sidebar:
         st.session_state.current_query = (
             f"What does {ticker} say about supply chain and cybersecurity risks?"
         )
-    if st.button(f"📑 Summarize {ticker} 2024 MD&A", use_container_width=True):
-        st.session_state.current_query = "Tell me about the MD&A section for 2024."
     if st.button("🚫 Hallucination Guard Test", use_container_width=True):
         st.session_state.current_query = f"What is {ticker}'s secret car project?"
 
@@ -169,16 +185,22 @@ with st.sidebar:
 
 
 def render_message_extras(msg: dict[str, Any]) -> None:
-    """Renders metadata pills, verified citations, and tool execution trace."""
+    """Renders metadata pills, sub-agent specialist reports, verified citations, and tool execution trace."""
     used_tools = msg.get("used_tools") or []
     citations = msg.get("citations") or []
     tool_trace = msg.get("tool_trace") or []
+    sub_reports = msg.get("sub_agent_reports") or []
+    self_corrections = msg.get("self_corrections", 0)
     model_used = msg.get("model")
     latency_ms = msg.get("latency_ms")
 
     pills_html = ""
     if model_used:
         pills_html += f'<span class="metric-pill">🤖 {model_used}</span>'
+    if sub_reports:
+        pills_html += (
+            f'<span class="metric-pill">🕸️ {len(sub_reports)} Sub-Agents</span>'
+        )
     if latency_ms is not None:
         pills_html += f'<span class="metric-pill">⏱️ {latency_ms / 1000:.1f}s</span>'
     if used_tools:
@@ -188,6 +210,10 @@ def render_message_extras(msg: dict[str, Any]) -> None:
     pills_html += (
         f'<span class="metric-pill">✅ {len(citations)} Verified Citations</span>'
     )
+    if self_corrections:
+        pills_html += (
+            f'<span class="metric-pill">🔄 {self_corrections} Guard Self-Correction</span>'
+        )
     trace_url = msg.get("trace_url")
     if trace_url:
         pills_html += (
@@ -195,6 +221,19 @@ def render_message_extras(msg: dict[str, Any]) -> None:
             f'<span class="metric-pill">🔭 Langfuse Trace ↗</span></a>'
         )
     st.markdown(pills_html, unsafe_allow_html=True)
+
+    if sub_reports:
+        with st.expander(
+            f"🕸️ Parallel Sub-Agent Specialist Reports ({len(sub_reports)} agents)"
+        ):
+            for rep in sub_reports:
+                st.markdown(
+                    f"**`{rep.get('agent')}`** ({rep.get('role', '').upper()} Specialist • "
+                    f"Ticker: `{rep.get('ticker')}` • "
+                    f"Citations: `{rep.get('citations_count', 0)}`)"
+                )
+                st.caption(rep.get("answer", ""))
+                st.divider()
 
     if citations:
         with st.expander(f"📚 Verified Citations & Sources ({len(citations)})"):
@@ -225,13 +264,13 @@ def render_message_extras(msg: dict[str, Any]) -> None:
     if tool_trace:
         with st.expander(f"🔍 Agent Tool Execution Trace ({len(tool_trace)} calls)"):
             for step_idx, step in enumerate(tool_trace, 1):
+                agent_tag = f"[{step.get('agent')}] " if step.get("agent") else ""
                 st.markdown(
-                    f"**Step {step_idx}: `{step.get('tool')}`** — Args: `{step.get('arguments')}`"
+                    f"**Step {step_idx}: {agent_tag}`{step.get('tool')}`** — Args: `{step.get('arguments')}`"
                 )
                 st.json(step.get("result"), expanded=False)
 
 
-# Main Workspace Tabs
 tab_chat, tab_explorer = st.tabs(
     ["💬 AI Financial Analyst", "📊 Financial Snapshot & Filing Index"]
 )
@@ -239,8 +278,7 @@ tab_chat, tab_explorer = st.tabs(
 with tab_chat:
     st.markdown(
         f"### {ticker} Research Workspace\n"
-        "Ask natural language questions about SEC 10-K/10-Q filings and structured XBRL financials. "
-        "Every numeric fact and narrative quote is verified against primary filings."
+        "Ask natural language questions or compare multiple public companies across SEC 10-K/10-Q filings and XBRL financials."
     )
 
     for message in st.session_state.messages:
@@ -250,7 +288,7 @@ with tab_chat:
                 render_message_extras(message)
 
     user_input = st.chat_input(
-        f"Ask about {ticker}'s revenue, margins, risk factors, MD&A, or growth calculations..."
+        f"Ask about {ticker} or compare peers (e.g. 'Compare AAPL and MSFT 2023 revenue')..."
     )
     prompt = st.session_state.get("current_query") or user_input
 
@@ -258,7 +296,6 @@ with tab_chat:
         st.session_state.current_query = None
         st.chat_message("user").markdown(prompt)
 
-        # Build multi-turn history before appending current user message
         history_payload: list[dict[str, str]] = []
         if multi_turn_enabled and st.session_state.messages:
             for m in st.session_state.messages[-6:]:
@@ -277,9 +314,23 @@ with tab_chat:
             req_provider = "groq"
             req_model = "llama-3.3-70b-versatile"
 
+        if agent_mode_label.startswith("Multi-Agent"):
+            req_mode = "multi_agent"
+        elif agent_mode_label.startswith("Single"):
+            req_mode = "single"
+        else:
+            req_mode = "auto"
+
+        extra_tickers = [
+            t.strip().upper()
+            for t in peer_tickers_input.split(",")
+            if t.strip()
+        ]
+        all_tickers = [ticker] + [t for t in extra_tickers if t != ticker]
+
         with st.chat_message("assistant"):
             with st.spinner(
-                f"Querying {ticker} XBRL data & Hybrid RAG filings..."
+                f"Running {req_mode.replace('_', '-')} financial analysis..."
             ):
                 try:
                     response = requests.post(
@@ -287,11 +338,13 @@ with tab_chat:
                         json={
                             "question": prompt,
                             "ticker": ticker,
+                            "tickers": all_tickers if len(all_tickers) > 1 else None,
+                            "mode": req_mode,
                             "history": history_payload if history_payload else None,
                             "provider": req_provider,
                             "model": req_model,
                         },
-                        timeout=120,
+                        timeout=180,
                     )
 
                     if response.status_code == 200:
@@ -316,6 +369,8 @@ with tab_chat:
                                 "citations": [],
                                 "used_tools": data.get("used_tools", []),
                                 "tool_trace": data.get("tool_trace", []),
+                                "sub_agent_reports": data.get("sub_agent_reports", []),
+                                "self_corrections": data.get("self_corrections", 0),
                                 "model": data.get("model"),
                                 "latency_ms": data.get("latency_ms"),
                                 "trace_url": data.get("trace_url"),
@@ -331,6 +386,8 @@ with tab_chat:
                                 "citations": data.get("citations", []),
                                 "used_tools": data.get("used_tools", []),
                                 "tool_trace": data.get("tool_trace", []),
+                                "sub_agent_reports": data.get("sub_agent_reports", []),
+                                "self_corrections": data.get("self_corrections", 0),
                                 "model": data.get("model"),
                                 "latency_ms": data.get("latency_ms"),
                                 "trace_url": data.get("trace_url"),
@@ -358,7 +415,7 @@ with tab_explorer:
         "Fetched directly from SEC EDGAR 10-K filings via `edgartools`."
     )
 
-    col_btn, col_info = st.columns([1, 3])
+    col_btn, _col_info = st.columns([1, 3])
     with col_btn:
         load_fin = st.button(
             f"🔄 Load {ticker} Financials", use_container_width=True
@@ -386,12 +443,20 @@ with tab_explorer:
         chart_col1, chart_col2 = st.columns(2)
         with chart_col1:
             st.markdown("##### Revenue vs. Net Income (USD)")
-            cols_1 = [c for c in ["Revenue", "Net Income", "Operating Income"] if c in df_indexed.columns]
+            cols_1 = [
+                c
+                for c in ["Revenue", "Net Income", "Operating Income"]
+                if c in df_indexed.columns
+            ]
             if cols_1:
                 st.bar_chart(df_indexed[cols_1])
         with chart_col2:
             st.markdown("##### Assets vs. Liabilities (USD)")
-            cols_2 = [c for c in ["Total Assets", "Total Liabilities"] if c in df_indexed.columns]
+            cols_2 = [
+                c
+                for c in ["Total Assets", "Total Liabilities"]
+                if c in df_indexed.columns
+            ]
             if cols_2:
                 st.bar_chart(df_indexed[cols_2])
 
@@ -415,6 +480,8 @@ with tab_explorer:
             }
             for t, info in tickers_map.items()
         ]
-        st.dataframe(pd.DataFrame(coverage_rows), use_container_width=True, hide_index=True)
+        st.dataframe(
+            pd.DataFrame(coverage_rows), use_container_width=True, hide_index=True
+        )
     else:
         st.warning("No chunks currently indexed in ChromaDB.")

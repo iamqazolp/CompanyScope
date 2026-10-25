@@ -21,14 +21,15 @@ from src.config import (
 )
 from src.embed import build_index, get_index_stats
 from src.ingest import ingest_company
+from src.multi_agent import detect_tickers, run_multi_agent_query
 from src.tools import get_company_financial_summary
 
 limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(
     title="CompanyScope API",
-    description="Zero-hallucination SEC filing & XBRL financial analysis agent",
-    version="0.2.0",
+    description="Zero-hallucination SEC filing & XBRL financial analysis agent (Single & Multi-Agent)",
+    version="0.3.0",
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore
@@ -45,6 +46,16 @@ app.add_middleware(
 class AskRequest(BaseModel):
     question: str
     ticker: Optional[str] = DEFAULT_TICKER
+    tickers: Optional[list[str]] = None
+    mode: Optional[str] = "single"
+    history: Optional[list[dict[str, str]]] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+
+
+class CompareRequest(BaseModel):
+    question: str
+    tickers: list[str]
     history: Optional[list[dict[str, str]]] = None
     provider: Optional[str] = None
     model: Optional[str] = None
@@ -63,6 +74,7 @@ def health_check() -> dict[str, Any]:
         "provider": LLM_PROVIDER,
         "model": active_model,
         "langfuse_enabled": bool(LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY),
+        "multi_agent_enabled": True,
     }
 
 
@@ -97,11 +109,53 @@ def get_ticker_financials(ticker: str) -> dict[str, Any]:
         return {"error": f"Failed to fetch financial summary: {str(e)}"}
 
 
+@app.post("/compare")
+@limiter.limit(f"{RATE_LIMIT_PER_MINUTE}/minute")
+def compare_companies(request: Request, payload: CompareRequest) -> dict[str, Any]:
+    try:
+        primary = payload.tickers[0] if payload.tickers else DEFAULT_TICKER
+        return run_multi_agent_query(
+            question=payload.question,
+            ticker=primary,
+            tickers=payload.tickers,
+            history=payload.history,
+            provider=payload.provider,
+            model=payload.model,
+        )
+    except Exception as e:
+        return {"error": f"Multi-agent comparison error: {str(e)}"}
+
+
 @app.post("/ask")
 @limiter.limit(f"{RATE_LIMIT_PER_MINUTE}/minute")
 def ask_question(request: Request, payload: AskRequest) -> dict[str, Any]:
     try:
         target_ticker: str = payload.ticker if payload.ticker else DEFAULT_TICKER
+        mode = (payload.mode or "single").lower()
+
+        if mode == "multi_agent":
+            return run_multi_agent_query(
+                question=payload.question,
+                ticker=target_ticker,
+                tickers=payload.tickers,
+                history=payload.history,
+                provider=payload.provider,
+                model=payload.model,
+            )
+        if mode == "auto":
+            detected = detect_tickers(
+                payload.question, target_ticker, payload.tickers
+            )
+            if len(detected) > 1:
+                return run_multi_agent_query(
+                    question=payload.question,
+                    ticker=target_ticker,
+                    tickers=detected,
+                    history=payload.history,
+                    provider=payload.provider,
+                    model=payload.model,
+                )
+
         result = process_query(
             question=payload.question,
             ticker=target_ticker,
