@@ -1,4 +1,5 @@
 import os
+import uuid
 from typing import Any
 
 import pandas as pd
@@ -65,6 +66,8 @@ def fetch_backend_status(base_url: str) -> tuple[dict[str, Any], dict[str, Any]]
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "session_id" not in st.session_state:
+    st.session_state.session_id = f"session_{uuid.uuid4().hex[:12]}"
 if "current_query" not in st.session_state:
     st.session_state.current_query = None
 if "financials_cache" not in st.session_state:
@@ -160,6 +163,7 @@ with st.sidebar:
         index=0,
     )
     multi_turn_enabled = st.toggle("Multi-Turn Conversation Context", value=True)
+    st.caption(f"Session ID: `{st.session_state.session_id}`")
 
     st.divider()
 
@@ -181,6 +185,7 @@ with st.sidebar:
 
     if st.button("🗑️ Clear Chat History", use_container_width=True):
         st.session_state.messages = []
+        st.session_state.session_id = f"session_{uuid.uuid4().hex[:12]}"
         st.rerun()
 
 
@@ -203,6 +208,9 @@ def render_message_extras(msg: dict[str, Any]) -> None:
         )
     if latency_ms is not None:
         pills_html += f'<span class="metric-pill">⏱️ {latency_ms / 1000:.1f}s</span>'
+    cost_usd = msg.get("cost_usd")
+    if cost_usd is not None and cost_usd > 0:
+        pills_html += f'<span class="metric-pill">💰 ${cost_usd:.5f}</span>'
     if used_tools:
         pills_html += (
             f'<span class="metric-pill">🛠️ Tools: {", ".join(used_tools)}</span>'
@@ -343,6 +351,7 @@ with tab_chat:
                             "history": history_payload if history_payload else None,
                             "provider": req_provider,
                             "model": req_model,
+                            "session_id": st.session_state.session_id,
                         },
                         timeout=180,
                     )
@@ -371,6 +380,7 @@ with tab_chat:
                                 "tool_trace": data.get("tool_trace", []),
                                 "sub_agent_reports": data.get("sub_agent_reports", []),
                                 "self_corrections": data.get("self_corrections", 0),
+                                "cost_usd": data.get("cost_usd"),
                                 "model": data.get("model"),
                                 "latency_ms": data.get("latency_ms"),
                                 "trace_url": data.get("trace_url"),
@@ -388,6 +398,7 @@ with tab_chat:
                                 "tool_trace": data.get("tool_trace", []),
                                 "sub_agent_reports": data.get("sub_agent_reports", []),
                                 "self_corrections": data.get("self_corrections", 0),
+                                "cost_usd": data.get("cost_usd"),
                                 "model": data.get("model"),
                                 "latency_ms": data.get("latency_ms"),
                                 "trace_url": data.get("trace_url"),

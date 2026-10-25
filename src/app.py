@@ -1,3 +1,5 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 from fastapi import FastAPI, Request
@@ -9,8 +11,10 @@ from slowapi.util import get_remote_address
 
 from src.agent import process_query
 from src.config import (
+    APP_VERSION,
     CORS_ALLOW_ORIGINS,
     DEFAULT_TICKER,
+    EMBEDDING_MODEL,
     GROQ_MODEL,
     INGEST_YEARS,
     LANGFUSE_PUBLIC_KEY,
@@ -18,18 +22,34 @@ from src.config import (
     LLM_PROVIDER,
     OPENAI_MODEL,
     RATE_LIMIT_PER_MINUTE,
+    get_langfuse,
+    obs_context,
+    propagate_trace_attributes,
 )
 from src.embed import build_index, get_index_stats
 from src.ingest import ingest_company
 from src.multi_agent import detect_tickers, run_multi_agent_query
 from src.tools import get_company_financial_summary
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    yield
+    lf = get_langfuse()
+    if lf is not None:
+        try:
+            lf.flush()
+        except Exception:
+            pass
+
+
 limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(
     title="CompanyScope API",
     description="Zero-hallucination SEC filing & XBRL financial analysis agent (Single & Multi-Agent)",
-    version="0.3.0",
+    version=APP_VERSION,
+    lifespan=lifespan,
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore
@@ -51,6 +71,8 @@ class AskRequest(BaseModel):
     history: Optional[list[dict[str, str]]] = None
     provider: Optional[str] = None
     model: Optional[str] = None
+    session_id: Optional[str] = None
+    user_id: Optional[str] = None
 
 
 class CompareRequest(BaseModel):
@@ -59,6 +81,8 @@ class CompareRequest(BaseModel):
     history: Optional[list[dict[str, str]]] = None
     provider: Optional[str] = None
     model: Optional[str] = None
+    session_id: Optional[str] = None
+    user_id: Optional[str] = None
 
 
 class IngestRequest(BaseModel):
@@ -88,15 +112,86 @@ def list_indexed_tickers() -> dict[str, Any]:
 
 @app.post("/ingest")
 def trigger_ingestion(payload: IngestRequest) -> dict[str, Any]:
-    try:
-        target_ticker = payload.ticker.upper().strip()
-        target_years = payload.years if payload.years else INGEST_YEARS
-        ingest_res = ingest_company(ticker=target_ticker, years=target_years)
-        indexed_count = build_index(ticker_filter=target_ticker)
-        ingest_res["chunks_indexed"] = indexed_count
-        return ingest_res
-    except Exception as e:
-        return {"error": f"Ingestion failed: {str(e)}"}
+    target_ticker = payload.ticker.upper().strip()
+    target_years = payload.years if payload.years else INGEST_YEARS
+    lf = get_langfuse()
+
+    with obs_context(
+        lf,
+        as_type="chain",
+        name="ingest-company-filings",
+        input={"ticker": target_ticker, "years": target_years},
+        version=APP_VERSION,
+    ) as root_obs:
+        with propagate_trace_attributes(
+            lf,
+            tags=["company-scope", "ingestion", f"ticker:{target_ticker}"],
+            version=APP_VERSION,
+            trace_name="ingest-company-filings",
+            metadata={"ticker": target_ticker},
+        ):
+            try:
+                with obs_context(
+                    lf,
+                    as_type="span",
+                    name="extract-and-chunk-filings",
+                    input={"ticker": target_ticker, "years": target_years},
+                ) as chunk_obs:
+                    ingest_res = ingest_company(
+                        ticker=target_ticker, years=target_years
+                    )
+                    if chunk_obs is not None:
+                        try:
+                            chunk_obs.update(output=ingest_res)
+                        except Exception:
+                            pass
+
+                with obs_context(
+                    lf,
+                    as_type="embedding",
+                    name="embed-and-index-chunks",
+                    model=EMBEDDING_MODEL,
+                    input={
+                        "ticker": target_ticker,
+                        "chunks_created": ingest_res.get("chunks_created", 0),
+                    },
+                ) as idx_obs:
+                    indexed_count = build_index(ticker_filter=target_ticker)
+                    if idx_obs is not None:
+                        try:
+                            idx_obs.update(output={"chunks_indexed": indexed_count})
+                        except Exception:
+                            pass
+
+                ingest_res["chunks_indexed"] = indexed_count
+                if root_obs is not None:
+                    try:
+                        root_obs.update(output=ingest_res)
+                    except Exception:
+                        pass
+                if lf is not None:
+                    try:
+                        lf.flush()
+                    except Exception:
+                        pass
+                return ingest_res
+            except Exception as e:
+                err_out = {"error": f"Ingestion failed: {str(e)}"}
+                if root_obs is not None:
+                    try:
+                        root_obs.update(
+                            output=err_out,
+                            level="ERROR",
+                            status_message=str(e),
+                        )
+                    except Exception:
+                        pass
+                if lf is not None:
+                    try:
+                        lf.flush()
+                    except Exception:
+                        pass
+                return err_out
 
 
 @app.get("/financials/{ticker}")
@@ -121,6 +216,8 @@ def compare_companies(request: Request, payload: CompareRequest) -> dict[str, An
             history=payload.history,
             provider=payload.provider,
             model=payload.model,
+            session_id=payload.session_id,
+            user_id=payload.user_id,
         )
     except Exception as e:
         return {"error": f"Multi-agent comparison error: {str(e)}"}
@@ -141,6 +238,8 @@ def ask_question(request: Request, payload: AskRequest) -> dict[str, Any]:
                 history=payload.history,
                 provider=payload.provider,
                 model=payload.model,
+                session_id=payload.session_id,
+                user_id=payload.user_id,
             )
         if mode == "auto":
             detected = detect_tickers(
@@ -154,6 +253,8 @@ def ask_question(request: Request, payload: AskRequest) -> dict[str, Any]:
                     history=payload.history,
                     provider=payload.provider,
                     model=payload.model,
+                    session_id=payload.session_id,
+                    user_id=payload.user_id,
                 )
 
         result = process_query(
@@ -162,6 +263,8 @@ def ask_question(request: Request, payload: AskRequest) -> dict[str, Any]:
             history=payload.history,
             provider=payload.provider,
             model=payload.model,
+            session_id=payload.session_id,
+            user_id=payload.user_id,
         )
         return result
     except Exception as e:

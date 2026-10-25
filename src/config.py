@@ -1,10 +1,14 @@
+from contextlib import nullcontext
 import os
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
+
+APP_VERSION = os.getenv("APP_VERSION", "0.2.0")
 
 
 def _get_int(name: str, default: int) -> int:
@@ -94,3 +98,68 @@ LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
 LANGFUSE_HOST = os.getenv(
     "LANGFUSE_HOST", os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
 )
+
+# GPT-6-Luna Pricing (USD per 1M tokens)
+GPT6_LUNA_INPUT_PRICE_PER_1M = _get_float("GPT6_LUNA_INPUT_PRICE_PER_1M", 0.10)
+GPT6_LUNA_CACHED_INPUT_PRICE_PER_1M = _get_float(
+    "GPT6_LUNA_CACHED_INPUT_PRICE_PER_1M", 0.01
+)
+GPT6_LUNA_CACHE_WRITE_PRICE_PER_1M = _get_float(
+    "GPT6_LUNA_CACHE_WRITE_PRICE_PER_1M", 0.125
+)
+GPT6_LUNA_OUTPUT_PRICE_PER_1M = _get_float("GPT6_LUNA_OUTPUT_PRICE_PER_1M", 0.50)
+
+LANGFUSE_TRACING_ENVIRONMENT = os.getenv(
+    "LANGFUSE_TRACING_ENVIRONMENT",
+    os.getenv("LANGFUSE_ENVIRONMENT", "development"),
+)
+
+_langfuse_client: Any = None
+
+
+def get_langfuse() -> Any:
+    """Initializes the Langfuse v4 client singleton after environment variables are loaded."""
+    global _langfuse_client
+    if _langfuse_client is False:
+        return None
+    if _langfuse_client is not None:
+        return _langfuse_client
+    if LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY:
+        try:
+            from langfuse import Langfuse
+
+            _langfuse_client = Langfuse(
+                public_key=LANGFUSE_PUBLIC_KEY,
+                secret_key=LANGFUSE_SECRET_KEY,
+                host=LANGFUSE_HOST,
+                environment=LANGFUSE_TRACING_ENVIRONMENT,
+                release=APP_VERSION,
+            )
+            return _langfuse_client
+        except Exception:
+            _langfuse_client = False
+            return None
+    _langfuse_client = False
+    return None
+
+
+def obs_context(lf: Any, **kwargs: Any) -> Any:
+    """Returns a Langfuse start_as_current_observation context manager if enabled, else nullcontext."""
+    if lf is not None:
+        try:
+            return lf.start_as_current_observation(**kwargs)
+        except Exception:
+            return nullcontext(None)
+    return nullcontext(None)
+
+
+def propagate_trace_attributes(lf: Any, **kwargs: Any) -> Any:
+    """Propagates trace-level attributes (session_id, user_id, tags, version, metadata, trace_name) to child observations."""
+    if lf is not None:
+        try:
+            from langfuse import propagate_attributes
+
+            return propagate_attributes(**kwargs)
+        except Exception:
+            return nullcontext(None)
+    return nullcontext(None)

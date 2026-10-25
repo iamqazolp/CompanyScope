@@ -13,7 +13,13 @@ from src.agent import (
     _get_langfuse,
     _obs_context,
 )
-from src.config import DEFAULT_TICKER, GROQ_MODEL, LLM_PROVIDER, OPENAI_MODEL
+from src.config import (
+    DEFAULT_TICKER,
+    GROQ_MODEL,
+    LLM_PROVIDER,
+    OPENAI_MODEL,
+    propagate_trace_attributes,
+)
 from src.guard import check_citations, verify_citations
 
 QUANT_TOOLS = [
@@ -94,7 +100,9 @@ COMMON_COMPANY_MAP = {
 }
 
 
-def detect_tickers(question: str, default_ticker: str, extra_tickers: list[str] | None = None) -> list[str]:
+def detect_tickers(
+    question: str, default_ticker: str, extra_tickers: list[str] | None = None
+) -> list[str]:
     """Detects all ticker symbols referenced in the question or explicitly passed."""
     tickers: list[str] = []
     if extra_tickers:
@@ -108,7 +116,6 @@ def detect_tickers(question: str, default_ticker: str, extra_tickers: list[str] 
         if re.search(rf"\b{name}\b", q_upper) and sym not in tickers:
             tickers.append(sym)
 
-    # Also match explicit uppercase ticker tokens like AAPL, MSFT, NVDA
     stopwords = {
         "SEC", "USD", "CEO", "CFO", "AI", "RAG", "XBRL", "MD", "MDA",
         "ITEM", "WHAT", "HOW", "DID", "AND", "THE", "FOR", "FROM", "WITH",
@@ -164,6 +171,7 @@ def _run_sub_agent(
     sys_prompt = QUANT_SYSTEM_PROMPT if role == "quant" else QUAL_SYSTEM_PROMPT
     tools_subset = QUANT_TOOLS if role == "quant" else QUAL_TOOLS
     agent_label = f"{role.upper()}_{ticker}"
+    lf = _get_langfuse()
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": sys_prompt},
@@ -182,125 +190,165 @@ def _run_sub_agent(
     used_tools: list[str] = []
     tool_trace: list[dict[str, Any]] = []
     self_corrections = 0
+    sub_cost_usd = 0.0
     active_model_used = model or (
         OPENAI_MODEL if LLM_PROVIDER == "openai" else GROQ_MODEL
     )
 
-    for _step in range(5):
-        try:
-            msg, active_model_used = _call_llm(
-                messages=messages,
-                use_tools=True,
-                provider=provider,
-                model=model,
-                tools_override=tools_subset,
-                obs_name=f"subagent_{role}_{ticker}",
-            )
-            tool_calls = msg.get("tool_calls") or []
-            if tool_calls:
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": msg.get("content") or "",
-                        "tool_calls": tool_calls,
-                    }
+    with _obs_context(
+        lf,
+        as_type="agent",
+        name=f"subagent:{role}:{ticker}",
+        input={"question": question, "ticker": ticker, "role": role},
+    ) as agent_span:
+        for _step in range(5):
+            try:
+                msg, active_model_used = _call_llm(
+                    messages=messages,
+                    use_tools=True,
+                    provider=provider,
+                    model=model,
+                    tools_override=tools_subset,
+                    obs_name=f"subagent_{role}_{ticker}_llm",
                 )
-                for tc in tool_calls:
-                    tc_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
-                    fn_info = tc.get("function") or {}
-                    fn_name = fn_info.get("name", "")
-                    raw_args = fn_info.get("arguments", "{}")
-                    used_tools.append(fn_name)
+                sub_cost_usd += float(
+                    (msg.get("_cost_details") or {}).get("total", 0.0)
+                )
+                tool_calls = msg.get("tool_calls") or []
+                if tool_calls:
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": msg.get("content") or "",
+                            "tool_calls": tool_calls,
+                        }
+                    )
+                    for tc in tool_calls:
+                        tc_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+                        fn_info = tc.get("function") or {}
+                        fn_name = fn_info.get("name", "")
+                        raw_args = fn_info.get("arguments", "{}")
+                        used_tools.append(fn_name)
 
-                    try:
-                        fn_args = (
-                            json.loads(raw_args)
-                            if isinstance(raw_args, str)
-                            else dict(raw_args)
-                        )
-                    except json.JSONDecodeError:
-                        fn_args = {}
-
-                    # Ensure ticker defaults to assigned ticker if omitted
-                    if fn_name in ("get_financial_data", "search_filings") and not fn_args.get("ticker"):
-                        fn_args["ticker"] = ticker
-
-                    if fn_name in TOOL_FUNCTIONS:
                         try:
-                            res = TOOL_FUNCTIONS[fn_name](**fn_args)
-                            tool_results_history[tc_id] = res
-                            res_str = json.dumps(res)
-                        except Exception as ex:
-                            res = {"error": str(ex)}
-                            res_str = json.dumps(res)
-                    else:
-                        res = {"error": f"Unsupported tool {fn_name}"}
-                        res_str = json.dumps(res)
+                            fn_args = (
+                                json.loads(raw_args)
+                                if isinstance(raw_args, str)
+                                else dict(raw_args)
+                            )
+                        except json.JSONDecodeError:
+                            fn_args = {}
 
-                    tool_trace.append(
-                        {
-                            "agent": agent_label,
-                            "tool": fn_name,
-                            "arguments": fn_args,
-                            "result": res,
-                        }
-                    )
-                    messages.append(
-                        {
-                            "tool_call_id": tc_id,
-                            "role": "tool",
-                            "name": fn_name,
-                            "content": res_str,
-                        }
-                    )
-            else:
-                content = msg.get("content") or "{}"
-                parsed = _extract_json(content)
-                _valid_cits, invalid_cits = check_citations(
-                    parsed, tool_results_history
-                )
-                if invalid_cits and self_corrections < 1:
-                    self_corrections += 1
-                    messages.append({"role": "assistant", "content": content})
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                f"Citation verification failed for: {json.dumps(invalid_cits)}\n"
-                                "Please self-correct your JSON so all quotes are exact verbatim substrings of chunk_text and all numbers match fetched tool results."
-                            ),
-                        }
-                    )
-                    continue
+                        if fn_name in ("get_financial_data", "search_filings") and not fn_args.get("ticker"):
+                            fn_args["ticker"] = ticker
 
-                verified = verify_citations(parsed, tool_results_history)
+                        obs_type = (
+                            "retriever" if fn_name == "search_filings" else "tool"
+                        )
+                        with _obs_context(
+                            lf,
+                            as_type=obs_type,
+                            name=f"tool:{fn_name}",
+                            input=fn_args,
+                        ) as t_span:
+                            if fn_name in TOOL_FUNCTIONS:
+                                try:
+                                    res = TOOL_FUNCTIONS[fn_name](**fn_args)
+                                    tool_results_history[tc_id] = res
+                                    res_str = json.dumps(res)
+                                except Exception as ex:
+                                    res = {"error": str(ex)}
+                                    res_str = json.dumps(res)
+                            else:
+                                res = {"error": f"Unsupported tool {fn_name}"}
+                                res_str = json.dumps(res)
+
+                            if t_span is not None:
+                                try:
+                                    t_span.update(output=res)
+                                except Exception:
+                                    pass
+
+                        tool_trace.append(
+                            {
+                                "agent": agent_label,
+                                "tool": fn_name,
+                                "arguments": fn_args,
+                                "result": res,
+                            }
+                        )
+                        messages.append(
+                            {
+                                "tool_call_id": tc_id,
+                                "role": "tool",
+                                "name": fn_name,
+                                "content": res_str,
+                            }
+                        )
+                else:
+                    content = msg.get("content") or "{}"
+                    parsed = _extract_json(content)
+                    _valid_cits, invalid_cits = check_citations(
+                        parsed, tool_results_history
+                    )
+                    if invalid_cits and self_corrections < 1:
+                        self_corrections += 1
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"Citation verification failed for: {json.dumps(invalid_cits)}\n"
+                                    "Please self-correct your JSON so all quotes are exact verbatim substrings of chunk_text and all numbers match fetched tool results."
+                                ),
+                            }
+                        )
+                        continue
+
+                    verified = verify_citations(parsed, tool_results_history)
+                    out_payload = {
+                        "agent": agent_label,
+                        "role": role,
+                        "ticker": ticker,
+                        "answer": verified.get("answer", ""),
+                        "citations": verified.get("citations", []),
+                        "needs_clarification": verified.get(
+                            "needs_clarification", ""
+                        ),
+                        "used_tools": list(dict.fromkeys(used_tools)),
+                        "tool_trace": tool_trace,
+                        "tool_results_history": tool_results_history,
+                        "self_corrections": self_corrections,
+                        "cost_usd": round(sub_cost_usd, 6),
+                        "model": active_model_used,
+                    }
+                    if agent_span is not None:
+                        try:
+                            agent_span.update(
+                                output={
+                                    "answer": out_payload["answer"],
+                                    "citations": out_payload["citations"],
+                                    "cost_usd": out_payload["cost_usd"],
+                                }
+                            )
+                        except Exception:
+                            pass
+                    return out_payload
+            except Exception as e:
                 return {
                     "agent": agent_label,
                     "role": role,
                     "ticker": ticker,
-                    "answer": verified.get("answer", ""),
-                    "citations": verified.get("citations", []),
-                    "needs_clarification": verified.get("needs_clarification", ""),
+                    "answer": f"Sub-agent {agent_label} encountered an issue: {e}",
+                    "citations": [],
+                    "needs_clarification": "",
                     "used_tools": list(dict.fromkeys(used_tools)),
                     "tool_trace": tool_trace,
                     "tool_results_history": tool_results_history,
                     "self_corrections": self_corrections,
+                    "cost_usd": round(sub_cost_usd, 6),
                     "model": active_model_used,
                 }
-        except Exception as e:
-            return {
-                "agent": agent_label,
-                "role": role,
-                "ticker": ticker,
-                "answer": f"Sub-agent {agent_label} encountered an issue: {e}",
-                "citations": [],
-                "needs_clarification": "",
-                "used_tools": list(dict.fromkeys(used_tools)),
-                "tool_trace": tool_trace,
-                "tool_results_history": tool_results_history,
-                "self_corrections": self_corrections,
-                "model": active_model_used,
-            }
 
     return {
         "agent": agent_label,
@@ -313,6 +361,7 @@ def _run_sub_agent(
         "tool_trace": tool_trace,
         "tool_results_history": tool_results_history,
         "self_corrections": self_corrections,
+        "cost_usd": round(sub_cost_usd, 6),
         "model": active_model_used,
     }
 
@@ -324,6 +373,8 @@ def run_multi_agent_query(
     history: list[dict[str, str]] | None = None,
     provider: str | None = None,
     model: str | None = None,
+    session_id: str | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Supervisor orchestrator that decomposes a query across companies and specialist roles
@@ -343,14 +394,20 @@ def run_multi_agent_query(
 
     with _obs_context(
         lf,
+        as_type="agent",
         name="companyscope_multi_agent_supervisor",
         input={
             "question": question,
             "target_tickers": target_tickers,
             "specialist_roles": roles,
-            "tasks": tasks,
         },
-    ) as root_span:
+    ) as root_span, propagate_trace_attributes(
+        lf,
+        session_id=session_id,
+        user_id=user_id,
+        tags=["company-scope", "multi-agent"] + [f"ticker:{t}" for t in target_tickers],
+        trace_name="companyscope_multi_agent_supervisor",
+    ):
         if lf is not None:
             try:
                 trace_url = lf.get_trace_url()
@@ -375,7 +432,6 @@ def run_multi_agent_query(
             for future in as_completed(future_to_task):
                 sub_reports.append(future.result())
 
-        # Preserve deterministic ordering matching `tasks`
         order_map = {
             f"{r.upper()}_{t}": idx for idx, (r, t) in enumerate(tasks)
         }
@@ -385,6 +441,7 @@ def run_multi_agent_query(
         combined_used_tools: list[str] = []
         combined_tool_trace: list[dict[str, Any]] = []
         total_self_corrections = 0
+        total_cost_usd = 0.0
 
         for rep in sub_reports:
             for k, v in rep.get("tool_results_history", {}).items():
@@ -394,8 +451,8 @@ def run_multi_agent_query(
                     combined_used_tools.append(ut)
             combined_tool_trace.extend(rep.get("tool_trace", []))
             total_self_corrections += int(rep.get("self_corrections", 0))
+            total_cost_usd += float(rep.get("cost_usd", 0.0))
 
-        # Fast-path if only 1 sub-agent ran
         if len(sub_reports) == 1:
             single = sub_reports[0]
             final_single: dict[str, Any] = {
@@ -412,9 +469,11 @@ def run_multi_agent_query(
                         "answer": single["answer"],
                         "citations_count": len(single["citations"]),
                         "self_corrections": single["self_corrections"],
+                        "cost_usd": single.get("cost_usd", 0.0),
                     }
                 ],
                 "self_corrections": total_self_corrections,
+                "cost_usd": round(total_cost_usd, 6),
                 "model": single.get("model"),
                 "latency_ms": round((time.time() - start_time) * 1000),
             }
@@ -422,7 +481,13 @@ def run_multi_agent_query(
                 final_single["trace_url"] = trace_url
             if root_span is not None:
                 try:
-                    root_span.update(output=final_single)
+                    root_span.update(
+                        output={
+                            "answer": final_single["answer"],
+                            "citations": final_single["citations"],
+                            "cost_usd": final_single["cost_usd"],
+                        }
+                    )
                 except Exception:
                     pass
             if lf is not None:
@@ -432,7 +497,6 @@ def run_multi_agent_query(
                     pass
             return final_single
 
-        # Synthesize findings across multiple parallel sub-agents
         reports_payload = [
             {
                 "sub_agent": rep["agent"],
@@ -477,6 +541,9 @@ def run_multi_agent_query(
                 model=model,
                 obs_name="multi_agent_synthesizer",
             )
+            total_cost_usd += float(
+                (synth_msg.get("_cost_details") or {}).get("total", 0.0)
+            )
             parsed = _extract_json(synth_msg.get("content") or "{}")
             _valid_cits, invalid_cits = check_citations(
                 parsed, combined_tool_results
@@ -503,11 +570,13 @@ def run_multi_agent_query(
                     model=model,
                     obs_name="multi_agent_synthesizer_self_correction",
                 )
+                total_cost_usd += float(
+                    (retry_msg.get("_cost_details") or {}).get("total", 0.0)
+                )
                 parsed = _extract_json(retry_msg.get("content") or "{}")
 
             verified_final = verify_citations(parsed, combined_tool_results)
         except Exception:
-            # Fallback synthesis if JSON parsing fails: concatenate sub-agent answers & citations
             merged_cits: list[dict[str, Any]] = []
             for rep in sub_reports:
                 merged_cits.extend(rep.get("citations", []))
@@ -529,10 +598,12 @@ def run_multi_agent_query(
                 "answer": rep["answer"],
                 "citations_count": len(rep.get("citations", [])),
                 "self_corrections": rep.get("self_corrections", 0),
+                "cost_usd": rep.get("cost_usd", 0.0),
             }
             for rep in sub_reports
         ]
         verified_final["self_corrections"] = total_self_corrections
+        verified_final["cost_usd"] = round(total_cost_usd, 6)
         verified_final["model"] = active_model_used
         verified_final["latency_ms"] = round((time.time() - start_time) * 1000)
         if trace_url:
@@ -540,7 +611,13 @@ def run_multi_agent_query(
 
         if root_span is not None:
             try:
-                root_span.update(output=verified_final)
+                root_span.update(
+                    output={
+                        "answer": verified_final.get("answer"),
+                        "citations": verified_final.get("citations"),
+                        "cost_usd": verified_final.get("cost_usd"),
+                    }
+                )
             except Exception:
                 pass
         if lf is not None:

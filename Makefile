@@ -1,10 +1,13 @@
-.PHONY: ingest index api ui lint typecheck test eval
+.PHONY: ingest index api ui lint typecheck test eval pricing
 
 ingest:
 	python -m src.ingest
 
 index:
 	python -m src.embed
+
+pricing:
+	python -m scripts.manage_model_pricing
 
 api:
 	uvicorn src.app:app --reload --port 8000
