@@ -28,20 +28,21 @@ def _normalize_concept(concept: str | None) -> str:
     return aliases.get(c, c)
 
 
-def verify_citations(output: dict[str, Any], tool_results: dict[str, Any]) -> dict[str, Any]:
+def check_citations(
+    output: dict[str, Any], tool_results: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """
-    Guards the LLM output by verifying that narrative quotes match retrieved chunks
-    and that numeric data was properly fetched via tools.
+    Inspects all citations in `output` against `tool_results` and returns
+    (valid_citations, invalid_citations).
     """
     if not isinstance(output, dict) or "citations" not in output:
-        return output
+        return [], []
 
     valid_citations: list[dict[str, Any]] = []
-    fabricated = False
+    invalid_citations: list[dict[str, Any]] = []
     answer = str(output.get("answer", ""))
     clean_answer_digits = answer.replace(".", "").replace(",", "")
 
-    # Check if calculator was used in this turn
     has_calculator_result = any(
         isinstance(v, (int, float)) for v in tool_results.values()
     )
@@ -55,7 +56,9 @@ def verify_citations(output: dict[str, Any], tool_results: dict[str, Any]) -> di
         if cit_type == "narrative":
             quote = str(citation.get("quote", "")).strip()
             if not quote:
-                fabricated = True
+                invalid_citations.append(
+                    {"citation": citation, "reason": "Empty quote in narrative citation."}
+                )
                 continue
 
             norm_quote = _normalize_text(quote)
@@ -77,21 +80,34 @@ def verify_citations(output: dict[str, Any], tool_results: dict[str, Any]) -> di
                 if is_valid:
                     break
 
+            if not is_valid:
+                invalid_citations.append(
+                    {
+                        "citation": citation,
+                        "reason": "Quote was not found verbatim in retrieved filing chunks.",
+                    }
+                )
+
         elif cit_type == "numeric":
             concept = _normalize_concept(citation.get("concept"))
             year = str(citation.get("year", "")).strip()
+            cit_ticker = str(citation.get("ticker", "")).upper().strip()
 
             for res_data in tool_results.values():
                 if isinstance(res_data, dict) and "value" in res_data:
                     res_concept = _normalize_concept(res_data.get("concept"))
                     res_period = str(res_data.get("period", "")).strip()
+                    res_ticker = str(res_data.get("ticker", "")).upper().strip()
+                    ticker_matches = (
+                        not cit_ticker or not res_ticker or cit_ticker == res_ticker
+                    )
                     concept_matches = (
                         not concept
                         or res_concept == concept
                         or concept in res_concept
                         or res_concept in concept
                     )
-                    if concept_matches and res_period == year:
+                    if ticker_matches and concept_matches and res_period == year:
                         val = res_data.get("value")
                         if val is not None:
                             val_str = (
@@ -107,12 +123,37 @@ def verify_citations(output: dict[str, Any], tool_results: dict[str, Any]) -> di
                                 is_valid = True
                         break
 
+            if not is_valid:
+                invalid_citations.append(
+                    {
+                        "citation": citation,
+                        "reason": "Numeric fact was not fetched via get_financial_data or digits do not match.",
+                    }
+                )
+        else:
+            invalid_citations.append(
+                {"citation": citation, "reason": f"Unknown citation type '{cit_type}'."}
+            )
+
         if is_valid:
             valid_citations.append(citation)
-        else:
-            fabricated = True
 
-    if fabricated:
+    return valid_citations, invalid_citations
+
+
+def verify_citations(
+    output: dict[str, Any], tool_results: dict[str, Any]
+) -> dict[str, Any]:
+    """
+    Guards the LLM output by verifying that narrative quotes match retrieved chunks
+    and that numeric data was properly fetched via tools.
+    """
+    if not isinstance(output, dict) or "citations" not in output:
+        return output
+
+    valid_citations, invalid_citations = check_citations(output, tool_results)
+
+    if invalid_citations:
         output["answer"] = "I couldn't fully verify this response."
         output["citations"] = valid_citations
 

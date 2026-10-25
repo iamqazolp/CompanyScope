@@ -6,7 +6,14 @@ from typing import Any
 from edgar import Company, set_identity
 from rank_bm25 import BM25Okapi
 
-from src.config import EDGAR_IDENTITY, SEARCH_RESULTS_LIMIT
+from src.config import (
+    EDGAR_IDENTITY,
+    EMBEDDING_DEVICE,
+    EMBEDDING_MODEL,
+    SEARCH_RESULTS_LIMIT,
+    get_langfuse,
+    obs_context,
+)
 from src.embed import get_collection, get_embedding_model
 
 # Configure EDGAR identity
@@ -114,6 +121,7 @@ def get_financial_data(ticker: str, concept: str, year: int | str) -> dict[str, 
             val_out = str(value)
 
         return {
+            "ticker": ticker,
             "concept": concept,
             "value": val_out,
             "unit": "USD",
@@ -171,8 +179,30 @@ def search_filings(
 
         model = get_embedding_model()
         k_limit = int(k) if k is not None else SEARCH_RESULTS_LIMIT
+        lf = get_langfuse()
 
-        query_embedding = model.encode([query]).tolist()
+        with obs_context(
+            lf,
+            as_type="embedding",
+            name="embed-search-query",
+            model=EMBEDDING_MODEL,
+            input={"query": query},
+            metadata={"device": EMBEDDING_DEVICE},
+        ) as emb_obs:
+            query_embedding = model.encode([query]).tolist()
+            if emb_obs is not None and query_embedding:
+                try:
+                    emb_obs.update(
+                        output={
+                            "dimensions": len(query_embedding[0]),
+                            "vector_preview": [
+                                round(v, 5) for v in query_embedding[0][:5]
+                            ],
+                        },
+                        usage_details={"input": len(_tokenize(query))},
+                    )
+                except Exception:
+                    pass
 
         # Build metadata filter
         where_clause: dict[str, Any] = {}

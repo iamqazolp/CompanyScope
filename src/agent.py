@@ -23,7 +23,7 @@ from src.config import (
     OPENAI_MODEL,
     OPENAI_URL,
 )
-from src.guard import verify_citations
+from src.guard import check_citations, verify_citations
 from src.tools import calculator, get_financial_data, search_filings
 
 _groq_client: Groq | None = None
@@ -197,6 +197,8 @@ def _call_llm(
     use_tools: bool = True,
     provider: str | None = None,
     model: str | None = None,
+    tools_override: list[dict[str, Any]] | None = None,
+    obs_name: str = "llm_chat_completion",
 ) -> tuple[dict[str, Any], str]:
     """
     Calls the configured LLM provider (OpenAI-compatible endpoint with gpt-6-luna by default,
@@ -204,6 +206,7 @@ def _call_llm(
     """
     active_provider = (provider or LLM_PROVIDER).lower()
     lf = _get_langfuse()
+    active_tools = tools_override if tools_override is not None else TOOLS_LIST
 
     if active_provider == "openai" and OPENAI_KEY:
         active_model = model or OPENAI_MODEL
@@ -213,8 +216,8 @@ def _call_llm(
             "messages": messages,
             "temperature": 0.0,
         }
-        if use_tools:
-            payload["tools"] = TOOLS_LIST
+        if use_tools and active_tools:
+            payload["tools"] = active_tools
             payload["tool_choice"] = "auto"
 
         session = _get_http_session()
@@ -222,7 +225,7 @@ def _call_llm(
         with _obs_context(
             lf,
             as_type="generation",
-            name="llm_chat_completion",
+            name=obs_name,
             model=active_model,
             input=messages,
         ) as gen:
@@ -269,15 +272,15 @@ def _call_llm(
         "timeout": GROQ_TIMEOUT,
         "temperature": 0.0,
     }
-    if use_tools:
-        kwargs["tools"] = TOOLS_LIST
+    if use_tools and active_tools:
+        kwargs["tools"] = active_tools
         kwargs["tool_choice"] = "auto"
         kwargs["parallel_tool_calls"] = False
 
     with _obs_context(
         lf,
         as_type="generation",
-        name="llm_chat_completion",
+        name=obs_name,
         model=active_model,
         input=messages,
     ) as gen:
@@ -363,7 +366,7 @@ def process_query(
 ) -> dict[str, Any]:
     """
     Process query using LLM and tools with multi-turn support, citation verification,
-    and full Langfuse v4 tracing (root span, LLM generations, and tool execution spans).
+    self-correction loop on guard failure, and full Langfuse v4 tracing.
     """
     start_time = time.time()
     ticker = (ticker or DEFAULT_TICKER).upper().strip()
@@ -391,6 +394,7 @@ def process_query(
     tool_results_history: dict[str, Any] = {}
     used_tools: list[str] = []
     tool_trace: list[dict[str, Any]] = []
+    self_correction_count = 0
     active_model_used = model or (
         OPENAI_MODEL if LLM_PROVIDER == "openai" else GROQ_MODEL
     )
@@ -409,7 +413,7 @@ def process_query(
             except Exception:
                 trace_url = None
 
-        for _iteration in range(5):
+        for _iteration in range(6):
             try:
                 message, active_model_used = _call_llm(
                     messages=messages,
@@ -491,9 +495,60 @@ def process_query(
                             k in parsed
                             for k in ["answer", "citations", "needs_clarification"]
                         ):
+                            _valid_cits, invalid_cits = check_citations(
+                                parsed, tool_results_history
+                            )
+                            # Self-Correction Loop on Citation Guard Failure
+                            if invalid_cits and self_correction_count < 1:
+                                self_correction_count += 1
+                                with _obs_context(
+                                    lf,
+                                    name="guard:self_correction",
+                                    input={"invalid_citations": invalid_cits},
+                                ) as sc_span:
+                                    if sc_span is not None:
+                                        try:
+                                            sc_span.update(
+                                                output={
+                                                    "status": "re-prompting_agent_to_fix_citations"
+                                                }
+                                            )
+                                        except Exception:
+                                            pass
+
+                                tool_trace.append(
+                                    {
+                                        "tool": "citation_guard_self_correction",
+                                        "arguments": {
+                                            "attempt": self_correction_count
+                                        },
+                                        "result": {
+                                            "invalid_citations": invalid_cits
+                                        },
+                                    }
+                                )
+                                messages.append(
+                                    {"role": "assistant", "content": content}
+                                )
+                                messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "CITATION GUARD VERIFICATION FAILED for the following citations:\n"
+                                            f"{json.dumps(invalid_cits, indent=2)}\n\n"
+                                            "Please self-correct your JSON output immediately:\n"
+                                            "1. Every narrative 'quote' MUST be an exact, contiguous verbatim substring copied character-for-character from the retrieved chunk_text in tool results.\n"
+                                            "2. Every numeric citation MUST match a concept and year fetched via get_financial_data, and its exact digits must appear in your 'answer'.\n"
+                                            "3. Drop any unverified citation or replace its quote with an exact verbatim substring from chunk_text. Output ONLY the corrected JSON object."
+                                        ),
+                                    }
+                                )
+                                continue
+
                             parsed = verify_citations(parsed, tool_results_history)
                             parsed["used_tools"] = list(dict.fromkeys(used_tools))
                             parsed["tool_trace"] = tool_trace
+                            parsed["self_corrections"] = self_correction_count
                             parsed["model"] = active_model_used
                             parsed["latency_ms"] = round(
                                 (time.time() - start_time) * 1000
@@ -600,7 +655,7 @@ def process_query(
             question,
             ticker,
             system_prompt,
-            "Max iterations (5) reached without a final answer.",
+            "Max iterations (6) reached without a final answer.",
             provider=provider,
             model=model,
         )
