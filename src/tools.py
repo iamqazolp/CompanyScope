@@ -14,14 +14,219 @@ from src.config import (
     get_langfuse,
     obs_context,
 )
-from src.embed import get_collection, get_embedding_model
+from src.embed import build_index, get_collection, get_embedding_model
+from src.ingest import ingest_company
 
 # Configure EDGAR identity
 set_identity(EDGAR_IDENTITY)
 
+_auto_ingested_tickers: set[str] = set()
+
 
 def _tokenize(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
+
+
+STATEMENT_CONCEPT_ALIASES: dict[str, list[str]] = {
+    "revenues": [
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues",
+        "SalesRevenueNet",
+    ],
+    "revenue": [
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues",
+        "SalesRevenueNet",
+    ],
+    "netincomeloss": ["NetIncomeLoss", "ProfitLoss"],
+    "net_income": ["NetIncomeLoss", "ProfitLoss"],
+    "operatingincomeloss": ["OperatingIncomeLoss"],
+    "operating_income": ["OperatingIncomeLoss"],
+    "grossprofit": ["GrossProfit"],
+    "gross_profit": ["GrossProfit"],
+    "gross_margin": ["GrossProfit"],
+    "costofgoodsandservicessold": [
+        "CostOfGoodsAndServicesSold",
+        "CostOfRevenue",
+    ],
+    "cost_of_sales": ["CostOfGoodsAndServicesSold", "CostOfRevenue"],
+    "cogs": ["CostOfGoodsAndServicesSold", "CostOfRevenue"],
+    "researchanddevelopmentexpense": ["ResearchAndDevelopmentExpense"],
+    "research_and_development": ["ResearchAndDevelopmentExpense"],
+    "r_d": ["ResearchAndDevelopmentExpense"],
+    "rd_expense": ["ResearchAndDevelopmentExpense"],
+    "sellinggeneralandadministrativeexpense": [
+        "SellingGeneralAndAdministrativeExpense"
+    ],
+    "sga": ["SellingGeneralAndAdministrativeExpense"],
+    "operatingexpenses": ["OperatingExpenses"],
+    "operating_expenses": ["OperatingExpenses"],
+    "earningspersharebasic": ["EarningsPerShareBasic"],
+    "eps_basic": ["EarningsPerShareBasic"],
+    "basic_eps": ["EarningsPerShareBasic"],
+    "earningspersharediluted": ["EarningsPerShareDiluted"],
+    "eps": ["EarningsPerShareDiluted", "EarningsPerShareBasic"],
+    "diluted_eps": ["EarningsPerShareDiluted"],
+    "assets": ["Assets"],
+    "total_assets": ["Assets"],
+    "liabilities": ["Liabilities"],
+    "total_liabilities": ["Liabilities"],
+    "stockholdersequity": ["StockholdersEquity"],
+    "stockholders_equity": ["StockholdersEquity"],
+    "cashandcashequivalentsatcarryingvalue": [
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+    ],
+    "cash": ["CashAndCashEquivalentsAtCarryingValue"],
+    "cash_and_equivalents": ["CashAndCashEquivalentsAtCarryingValue"],
+    "inventorynet": ["InventoryNet"],
+    "inventory": ["InventoryNet"],
+    "inventories": ["InventoryNet"],
+    "accountsreceivablenetcurrent": ["AccountsReceivableNetCurrent"],
+    "accounts_receivable": ["AccountsReceivableNetCurrent"],
+    "propertyplantandequipmentnet": ["PropertyPlantAndEquipmentNet"],
+    "ppe": ["PropertyPlantAndEquipmentNet"],
+    "longtermdebt": ["LongTermDebtNoncurrent", "LongTermDebt"],
+    "long_term_debt": ["LongTermDebtNoncurrent", "LongTermDebt"],
+    "term_debt": ["LongTermDebtNoncurrent", "LongTermDebtCurrent"],
+    "total_debt": ["LongTermDebtNoncurrent", "LongTermDebt"],
+    "retainedearnings": ["RetainedEarningsAccumulatedDeficit"],
+    "retained_earnings": ["RetainedEarningsAccumulatedDeficit"],
+    "operatingcashflow": ["NetCashProvidedByUsedInOperatingActivities"],
+    "operating_cash_flow": ["NetCashProvidedByUsedInOperatingActivities"],
+    "cash_flow_from_operations": ["NetCashProvidedByUsedInOperatingActivities"],
+    "capitalexpenditures": ["PaymentsToAcquirePropertyPlantAndEquipment"],
+    "capital_expenditures": ["PaymentsToAcquirePropertyPlantAndEquipment"],
+    "capex": ["PaymentsToAcquirePropertyPlantAndEquipment"],
+    "depreciation": ["DepreciationDepletionAndAmortization"],
+    "depreciation_and_amortization": ["DepreciationDepletionAndAmortization"],
+    "sharebasedcompensation": ["ShareBasedCompensation"],
+    "share_based_compensation": ["ShareBasedCompensation"],
+    "sbc": ["ShareBasedCompensation"],
+    "dividends": ["PaymentsOfDividends"],
+    "dividends_paid": ["PaymentsOfDividends"],
+    "sharerepurchases": ["PaymentsForRepurchaseOfCommonStock"],
+    "share_repurchases": ["PaymentsForRepurchaseOfCommonStock"],
+    "buybacks": ["PaymentsForRepurchaseOfCommonStock"],
+}
+
+
+def _lookup_concept_in_statements(
+    financials: Any, concept: str, year_str: str
+) -> float | None:
+    """Searches income statement, balance sheet, and cash flow statement DataFrames for a concept or label."""
+    concept_lower = re.sub(r"[^a-z0-9]+", "_", concept.lower()).strip("_")
+    concept_compact = concept_lower.replace("_", "")
+
+    target_suffixes = STATEMENT_CONCEPT_ALIASES.get(
+        concept_lower
+    ) or STATEMENT_CONCEPT_ALIASES.get(concept_compact) or [concept]
+
+    statement_fns = [
+        getattr(financials, "income_statement", None),
+        getattr(financials, "balance_sheet", None),
+        getattr(financials, "cash_flow_statement", None),
+    ]
+
+    for fn in statement_fns:
+        if not callable(fn):
+            continue
+        try:
+            stmt = fn()
+            if stmt is None or not hasattr(stmt, "to_dataframe"):
+                continue
+            df = stmt.to_dataframe()
+            if df is None or df.empty:
+                continue
+
+            # Identify value columns (e.g. '2025-09-27 (FY)' or '2024-09-28')
+            meta_cols = {
+                "concept",
+                "label",
+                "standard_concept",
+                "level",
+                "abstract",
+                "dimension",
+                "is_breakdown",
+                "dimension_axis",
+                "dimension_member",
+                "dimension_member_label",
+                "dimension_label",
+                "balance",
+                "weight",
+                "preferred_sign",
+                "parent_concept",
+                "parent_abstract_concept",
+            }
+            val_cols = [c for c in df.columns if c not in meta_cols]
+            if not val_cols:
+                continue
+
+            chosen_col = val_cols[0]
+            for vc in val_cols:
+                if str(vc).startswith(year_str) or year_str in str(vc):
+                    chosen_col = vc
+                    break
+
+            # 1. Exact/suffix match on XBRL concept column (prefer non-breakdown rows first)
+            for allow_breakdown in (False, True):
+                sub_df = (
+                    df
+                    if allow_breakdown or "is_breakdown" not in df.columns
+                    else df[~df["is_breakdown"]]
+                )
+                for suf in target_suffixes:
+                    suf_clean = suf.lower().replace("_", "")
+                    for _, row in sub_df.iterrows():
+                        raw_c = str(row.get("concept") or "")
+                        c_tail = raw_c.split("_")[-1].lower()
+                        if c_tail == suf_clean or raw_c.lower().endswith(
+                            suf.lower()
+                        ):
+                            raw_val = row.get(chosen_col)
+                            if raw_val is not None and str(raw_val) not in (
+                                "nan",
+                                "None",
+                                "",
+                            ):
+                                try:
+                                    return float(
+                                        str(raw_val)
+                                        .replace(",", "")
+                                        .replace("$", "")
+                                        .strip()
+                                    )
+                                except ValueError:
+                                    pass
+
+            # 2. Match on human-readable row label (e.g. 'iPhone', 'Services', 'Gross margin', 'Research and development')
+            for _, row in df.iterrows():
+                lbl = str(row.get("label") or "").strip().lower()
+                lbl_norm = re.sub(r"[^a-z0-9]+", "_", lbl).strip("_")
+                if (
+                    lbl_norm == concept_lower
+                    or lbl.replace(" ", "") == concept_compact
+                    or (len(concept_lower) >= 4 and concept_lower in lbl_norm)
+                ):
+                    raw_val = row.get(chosen_col)
+                    if raw_val is not None and str(raw_val) not in (
+                        "nan",
+                        "None",
+                        "",
+                    ):
+                        try:
+                            return float(
+                                str(raw_val)
+                                .replace(",", "")
+                                .replace("$", "")
+                                .strip()
+                            )
+                        except ValueError:
+                            pass
+        except Exception:
+            continue
+
+    return None
 
 
 def get_financial_data(ticker: str, concept: str, year: int | str) -> dict[str, Any]:
@@ -44,6 +249,17 @@ def get_financial_data(ticker: str, concept: str, year: int | str) -> dict[str, 
         if not target_filing:
             for filing in filings:
                 if str(filing.filing_date).startswith(year_str):
+                    target_filing = filing
+                    break
+
+        if not target_filing:
+            # Fallback to 10-Q filings if a 10-K for that year does not exist yet
+            q_filings = company.get_filings(form="10-Q")
+            for filing in q_filings:
+                if (
+                    filing.report_date
+                    and str(filing.report_date).startswith(year_str)
+                ) or str(filing.filing_date).startswith(year_str):
                     target_filing = filing
                     break
 
@@ -94,6 +310,8 @@ def get_financial_data(ticker: str, concept: str, year: int | str) -> dict[str, 
             "current_assets": "get_current_assets",
             "currentliabilities": "get_current_liabilities",
             "current_liabilities": "get_current_liabilities",
+            "shares_outstanding_basic": "get_shares_outstanding_basic",
+            "shares_outstanding_diluted": "get_shares_outstanding_diluted",
         }
 
         if concept_lower in method_mapping:
@@ -109,6 +327,22 @@ def get_financial_data(ticker: str, concept: str, year: int | str) -> dict[str, 
         if method_name and hasattr(financials, method_name):
             method = getattr(financials, method_name)
             value = method()
+
+        # Fallback to XBRL statement DataFrames when helper method is missing or returns None
+        if value is None:
+            if concept_compact in ("freecashflow",):
+                ocf = _lookup_concept_in_statements(
+                    financials, "OperatingCashFlow", year_str
+                )
+                capex = _lookup_concept_in_statements(
+                    financials, "CapitalExpenditures", year_str
+                )
+                if ocf is not None and capex is not None:
+                    value = ocf - abs(capex)
+            else:
+                value = _lookup_concept_in_statements(
+                    financials, concept, year_str
+                )
 
         if value is None:
             return {"error": f"Concept '{concept}' not supported or not found."}
@@ -174,6 +408,27 @@ def search_filings(
     """
     try:
         collection = get_collection()
+        clean_ticker = str(ticker).upper().strip() if ticker else None
+
+        # On-demand auto-ingestion if a requested ticker has 0 indexed chunks in ChromaDB
+        if clean_ticker and clean_ticker not in _auto_ingested_tickers:
+            existing_for_ticker = collection.get(
+                where={"ticker": clean_ticker}, limit=1
+            )
+            if not (existing_for_ticker and existing_for_ticker.get("ids")):
+                _auto_ingested_tickers.add(clean_ticker)
+                try:
+                    target_yr = int(str(year).strip()) if year else None
+                    yrs_to_ingest = (
+                        [target_yr] if target_yr else [2023, 2024, 2025]
+                    )
+                    ingest_company(ticker=clean_ticker, years=yrs_to_ingest)
+                    build_index(ticker_filter=clean_ticker)
+                except Exception as auto_err:
+                    print(
+                        f"Auto-ingestion skipped for {clean_ticker}: {auto_err}"
+                    )
+
         if collection.count() == 0:
             return []
 

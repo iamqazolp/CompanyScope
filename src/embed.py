@@ -84,6 +84,16 @@ def build_index(ticker_filter: str | None = None) -> int:
     embeddings = model.encode(documents, show_progress_bar=True).tolist()
 
     print("Storing in ChromaDB...")
+    try:
+        if ticker_filter:
+            collection.delete(where={"ticker": ticker_filter.upper()})
+        else:
+            existing = collection.get(include=[])
+            if existing and existing.get("ids"):
+                collection.delete(ids=existing["ids"])
+    except Exception:
+        pass
+
     batch_size = 5000
     for i in range(0, len(ids), batch_size):
         collection.upsert(

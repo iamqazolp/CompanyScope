@@ -198,7 +198,7 @@ TOOLS_LIST: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_financial_data",
-            "description": "Fetches exact financial facts (e.g., 'Revenues', 'NetIncomeLoss', 'OperatingIncomeLoss', 'Assets', 'Liabilities', 'StockholdersEquity', 'OperatingCashFlow', 'FreeCashFlow') for a given company and year.",
+            "description": "Fetches exact XBRL financial facts (e.g., 'Revenues', 'NetIncomeLoss', 'OperatingIncomeLoss', 'GrossProfit', 'ResearchAndDevelopmentExpense', 'SellingGeneralAndAdministrativeExpense', 'EarningsPerShareDiluted', 'Assets', 'Liabilities', 'StockholdersEquity', 'CashAndCashEquivalents', 'LongTermDebt', 'OperatingCashFlow', 'CapitalExpenditures', 'FreeCashFlow', 'Dividends', 'ShareRepurchases', or segment labels like 'iPhone', 'Services') for a given company and year.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -208,7 +208,7 @@ TOOLS_LIST: list[dict[str, Any]] = [
                     },
                     "concept": {
                         "type": "string",
-                        "description": "The financial concept to fetch, e.g., Revenues, NetIncomeLoss, Assets, Liabilities",
+                        "description": "The financial concept to fetch, e.g., Revenues, NetIncomeLoss, GrossProfit, ResearchAndDevelopmentExpense, Assets, Liabilities, OperatingCashFlow, FreeCashFlow",
                     },
                     "year": {
                         "type": "string",
@@ -223,7 +223,7 @@ TOOLS_LIST: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "search_filings",
-            "description": "Performs a hybrid semantic + lexical search over SEC filings (10-K, 10-Q) to retrieve narrative chunks and section summaries.",
+            "description": "Performs a hybrid semantic + lexical search over SEC filings (10-K, 10-Q, and 8-K Item 2.02 earnings releases) to retrieve narrative chunks and section summaries.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -238,7 +238,7 @@ TOOLS_LIST: list[dict[str, Any]] = [
                     },
                     "section": {
                         "type": "string",
-                        "description": "Optional section filter (e.g., 'Item 1', 'Item 1A', 'Item 7', 'Item 7A')",
+                        "description": "Optional section filter (e.g., 'Item 1', 'Item 1A', 'Item 7', 'Item 7A', 'Item 2', 'Item 2.02')",
                     },
                 },
                 "required": ["query"],
