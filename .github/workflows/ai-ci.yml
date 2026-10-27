@@ -2,7 +2,7 @@ name: AI CI
 
 on:
   push:
-    branches: [ "main", "experiment-raptor" ]
+    branches: [ "main", "feat/multi-agent", "experiment-raptor" ]
   pull_request:
     branches: [ "main" ]
 
@@ -27,7 +27,10 @@ jobs:
       - name: Create .env
         run: |
           if [ -n "${{ secrets.OPENAI_KEY }}" ]; then echo "OPENAI_KEY=${{ secrets.OPENAI_KEY }}" >> .env; fi
+          if [ -n "${{ secrets.OPENAI_API_KEY }}" ] && [ -z "${{ secrets.OPENAI_KEY }}" ]; then echo "OPENAI_KEY=${{ secrets.OPENAI_API_KEY }}" >> .env; fi
           if [ -n "${{ secrets.OPENAI_URL }}" ]; then echo "OPENAI_URL=${{ secrets.OPENAI_URL }}" >> .env; fi
+          if [ -n "${{ secrets.OPENAI_MODEL }}" ]; then echo "OPENAI_MODEL=${{ secrets.OPENAI_MODEL }}" >> .env; fi
+          if [ -n "${{ secrets.EDGAR_IDENTITY }}" ]; then echo "EDGAR_IDENTITY=${{ secrets.EDGAR_IDENTITY }}" >> .env; fi
 
       - name: Run Ruff
         run: ruff check .
@@ -35,7 +38,11 @@ jobs:
       - name: Run MyPy
         run: mypy src/ --ignore-missing-imports
 
+      - name: Build ChromaDB Vector Index
+        run: python -m src.embed
+
       - name: Run Pytest with JSON Report
+        continue-on-error: true
         run: pytest tests/test_eval.py -v --json-report --json-report-file=report.json
 
       - name: Check Evaluation Pass Rate
