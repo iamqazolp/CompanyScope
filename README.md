@@ -109,9 +109,6 @@ OPENAI_URL=https://api.shopaikey.com
 OPENAI_KEY=your_openai_api_key
 OPENAI_MODEL=gpt-6-luna
 
-# Fallback / alternative provider (Groq)
-GROQ_API_KEY=gsk_your_groq_key
-
 # SEC EDGAR identity (required by SEC fair-access policy)
 EDGAR_IDENTITY=your_email@example.com
 DEFAULT_TICKER=AAPL

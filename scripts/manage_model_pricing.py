@@ -366,7 +366,7 @@ def main() -> None:
     parser.add_argument(
         "--model",
         type=str,
-        help="Model name (e.g. gpt-6-luna, gpt-5.6-luna, llama-3.3-70b-versatile)",
+        help="Model name (e.g. gpt-6-luna, gpt-5.6-luna)",
     )
     parser.add_argument(
         "--input",

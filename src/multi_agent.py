@@ -15,8 +15,6 @@ from src.agent import (
 )
 from src.config import (
     DEFAULT_TICKER,
-    GROQ_MODEL,
-    LLM_PROVIDER,
     OPENAI_MODEL,
     propagate_trace_attributes,
 )
@@ -191,9 +189,7 @@ def _run_sub_agent(
     tool_trace: list[dict[str, Any]] = []
     self_corrections = 0
     sub_cost_usd = 0.0
-    active_model_used = model or (
-        OPENAI_MODEL if LLM_PROVIDER == "openai" else GROQ_MODEL
-    )
+    active_model_used = model or OPENAI_MODEL
 
     with _obs_context(
         lf,
@@ -530,9 +526,7 @@ def run_multi_agent_query(
             }
         )
 
-        active_model_used = model or (
-            OPENAI_MODEL if LLM_PROVIDER == "openai" else GROQ_MODEL
-        )
+        active_model_used = model or OPENAI_MODEL
         try:
             synth_msg, active_model_used = _call_llm(
                 messages=synth_messages,

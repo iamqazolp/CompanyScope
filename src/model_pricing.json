@@ -6,13 +6,5 @@
     "cache_write_per_1m": 0.125,
     "output_per_1m": 0.5,
     "tokenizer_id": "openai"
-  },
-  "llama-3.3-70b-versatile": {
-    "match_pattern": "(?i)^(groq/)?(llama-3\\.3-70b-versatile)$",
-    "input_per_1m": 0.59,
-    "cached_input_per_1m": 0.59,
-    "cache_write_per_1m": 0.59,
-    "output_per_1m": 0.79,
-    "tokenizer_id": "openai"
   }
 }

@@ -51,11 +51,7 @@ OPENAI_URL = os.getenv("OPENAI_URL", "https://api.shopaikey.com").rstrip("/")
 OPENAI_KEY = os.getenv("OPENAI_KEY", os.getenv("OPENAI_API_KEY", ""))
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-6-luna")
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-GROQ_TIMEOUT = _get_float("GROQ_TIMEOUT", 30.0)
-
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai" if OPENAI_KEY else "groq").lower()
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()
 LLM_TIMEOUT = _get_float("LLM_TIMEOUT", 90.0)
 
 # SEC EDGAR Configuration

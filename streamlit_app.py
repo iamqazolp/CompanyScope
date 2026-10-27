@@ -158,7 +158,6 @@ with st.sidebar:
         options=[
             "Default (Configured)",
             "openai (gpt-6-luna)",
-            "groq (llama-3.3-70b-versatile)",
         ],
         index=0,
     )
@@ -318,9 +317,6 @@ with tab_chat:
         if provider_choice.startswith("openai"):
             req_provider = "openai"
             req_model = "gpt-6-luna"
-        elif provider_choice.startswith("groq"):
-            req_provider = "groq"
-            req_model = "llama-3.3-70b-versatile"
 
         if agent_mode_label.startswith("Multi-Agent"):
             req_mode = "multi_agent"

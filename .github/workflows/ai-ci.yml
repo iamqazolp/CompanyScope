@@ -26,7 +26,6 @@ jobs:
 
       - name: Create .env
         run: |
-          echo "GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}" >> .env
           if [ -n "${{ secrets.OPENAI_KEY }}" ]; then echo "OPENAI_KEY=${{ secrets.OPENAI_KEY }}" >> .env; fi
           if [ -n "${{ secrets.OPENAI_URL }}" ]; then echo "OPENAI_URL=${{ secrets.OPENAI_URL }}" >> .env; fi
 
