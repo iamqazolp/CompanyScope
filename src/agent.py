@@ -24,7 +24,12 @@ from src.config import (
     propagate_trace_attributes,
 )
 from src.guard import check_citations, verify_citations
-from src.tools import calculator, get_financial_data, search_filings
+from src.tools import (
+    calculator,
+    get_earnings_transcripts,
+    get_financial_data,
+    search_filings,
+)
 
 _http_session: requests.Session | None = None
 _langfuse_client: Any = None
@@ -248,6 +253,35 @@ TOOLS_LIST: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "get_earnings_transcripts",
+            "description": "Fetches earnings call transcripts and SEC 8-K Item 2.02 (Exhibit 99.1) quarterly earnings releases containing CEO/CFO remarks, quarterly records, and guidance.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "The stock ticker symbol, e.g., AAPL",
+                    },
+                    "year": {
+                        "type": "string",
+                        "description": "Optional year filter, e.g., '2025'",
+                    },
+                    "quarter": {
+                        "type": "string",
+                        "description": "Optional quarter filter (e.g., '1', '2', '3', '4')",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional search query to rank relevant remarks (e.g., 'CEO guidance gross margin iPhone')",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "calculator",
             "description": "Safely evaluates simple arithmetic expressions (+, -, *, /, %, ()).",
             "parameters": {
@@ -267,6 +301,7 @@ TOOLS_LIST: list[dict[str, Any]] = [
 TOOL_FUNCTIONS: dict[str, Any] = {
     "get_financial_data": get_financial_data,
     "search_filings": search_filings,
+    "get_earnings_transcripts": get_earnings_transcripts,
     "calculator": calculator,
 }
 

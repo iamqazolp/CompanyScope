@@ -53,11 +53,11 @@ def check_citations(
         cit_type = citation.get("type")
         is_valid = False
 
-        if cit_type == "narrative":
+        if cit_type in ("narrative", "earnings", "sentiment"):
             quote = str(citation.get("quote", "")).strip()
             if not quote:
                 invalid_citations.append(
-                    {"citation": citation, "reason": "Empty quote in narrative citation."}
+                    {"citation": citation, "reason": f"Empty quote in {cit_type} citation."}
                 )
                 continue
 

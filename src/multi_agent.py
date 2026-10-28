@@ -26,7 +26,9 @@ QUANT_TOOLS = [
     if t["function"]["name"] in ("get_financial_data", "calculator")
 ]
 QUAL_TOOLS = [
-    t for t in TOOLS_LIST if t["function"]["name"] in ("search_filings",)
+    t
+    for t in TOOLS_LIST
+    if t["function"]["name"] in ("search_filings", "get_earnings_transcripts")
 ]
 
 QUANT_SYSTEM_PROMPT = """You are the Quantitative XBRL Financial Sub-Agent for CompanyScope.
@@ -143,7 +145,8 @@ def classify_needed_specialists(question: str) -> list[str]:
         "risk", "supply chain", "cyber", "strategy", "md&a", "management",
         "competit", "artificial intelligence", "ai ", "business", "item 1",
         "item 7", "narrative", "summarize", "summary", "mention", "say about",
-        "outlook", "challenge", "litigation", "regulation",
+        "outlook", "challenge", "litigation", "regulation", "earnings call",
+        "transcript", "press release", "ceo", "cfo", "guidance", "commentary",
     )
 
     needs_quant = any(kw in q_lower for kw in quant_keywords)
@@ -235,7 +238,11 @@ def _run_sub_agent(
                         except json.JSONDecodeError:
                             fn_args = {}
 
-                        if fn_name in ("get_financial_data", "search_filings") and not fn_args.get("ticker"):
+                        if fn_name in (
+                            "get_financial_data",
+                            "search_filings",
+                            "get_earnings_transcripts",
+                        ) and not fn_args.get("ticker"):
                             fn_args["ticker"] = ticker
 
                         obs_type = (

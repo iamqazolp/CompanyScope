@@ -5,11 +5,14 @@ from typing import Any
 
 from edgar import Company, set_identity
 from rank_bm25 import BM25Okapi
+import requests
 
 from src.config import (
     EDGAR_IDENTITY,
     EMBEDDING_DEVICE,
     EMBEDDING_MODEL,
+    FINNHUB_API_KEY,
+    FMP_API_KEY,
     SEARCH_RESULTS_LIMIT,
     get_langfuse,
     obs_context,
@@ -594,6 +597,198 @@ def search_filings(
     except Exception as e:
         print(f"Search error: {e}")
         return []
+
+
+def get_earnings_transcripts(
+    ticker: str,
+    year: str | int | None = None,
+    quarter: str | int | None = None,
+    query: str | None = None,
+    k: int = 4,
+) -> list[dict[str, Any]]:
+    """
+    Fetches earnings call transcripts and SEC 8-K Item 2.02 (Exhibit 99.1) quarterly earnings releases
+    with CEO/CFO commentary for a given company, optionally filtered by year, quarter, and search query.
+    """
+    clean_ticker = ticker.upper().strip()
+    target_year: int | None = None
+    if year is not None and str(year).strip():
+        try:
+            target_year = int(str(year).strip())
+        except ValueError:
+            target_year = None
+
+    target_quarter: int | None = None
+    if quarter is not None and str(quarter).strip():
+        q_str = re.sub(r"[^0-9]", "", str(quarter))
+        if q_str:
+            try:
+                target_quarter = int(q_str)
+            except ValueError:
+                target_quarter = None
+
+    collected_chunks: list[dict[str, Any]] = []
+
+    # 1. Optional Financial Modeling Prep (FMP) Transcript API if FMP_API_KEY is configured
+    if FMP_API_KEY:
+        try:
+            fmp_yr = target_year or 2025
+            fmp_q = target_quarter or 4
+            url = (
+                f"https://financialmodelingprep.com/api/v3/earning_call_transcript/"
+                f"{clean_ticker}?year={fmp_yr}&quarter={fmp_q}&apikey={FMP_API_KEY}"
+            )
+            r = requests.get(url, timeout=10)
+            if r.ok:
+                data = r.json()
+                if isinstance(data, list) and data:
+                    content = str(data[0].get("content") or "").strip()
+                    if content:
+                        words = content.split()
+                        for idx, i in enumerate(range(0, len(words), 400)):
+                            piece = " ".join(words[i : i + 450])
+                            collected_chunks.append(
+                                {
+                                    "chunk_id": f"{clean_ticker}_{fmp_yr}_Q{fmp_q}_TRANSCRIPT_{idx}",
+                                    "chunk_text": piece,
+                                    "ticker": clean_ticker,
+                                    "year": fmp_yr,
+                                    "section": f"Earnings Call Q{fmp_q}",
+                                    "source_type": "earnings_call",
+                                }
+                            )
+        except Exception:
+            pass
+
+    # 2. Optional Finnhub Transcripts API if FINNHUB_API_KEY is configured and FMP yielded nothing
+    if not collected_chunks and FINNHUB_API_KEY:
+        try:
+            r_list = requests.get(
+                f"https://finnhub.io/api/v1/stock/transcripts/list?symbol={clean_ticker}&token={FINNHUB_API_KEY}",
+                timeout=10,
+            )
+            if r_list.ok:
+                transcripts = (r_list.json() or {}).get("transcripts") or []
+                for meta in transcripts[:4]:
+                    t_yr = meta.get("year")
+                    t_q = meta.get("quarter")
+                    if target_year and t_yr != target_year:
+                        continue
+                    if target_quarter and t_q != target_quarter:
+                        continue
+                    t_id = meta.get("id")
+                    if not t_id:
+                        continue
+                    r_tr = requests.get(
+                        f"https://finnhub.io/api/v1/stock/transcripts?id={t_id}&token={FINNHUB_API_KEY}",
+                        timeout=10,
+                    )
+                    if r_tr.ok:
+                        tr_body = r_tr.json() or {}
+                        speeches = tr_body.get("transcript") or []
+                        full_text = "\n".join(
+                            f"{s.get('name', 'Speaker')}: {' '.join(s.get('speech', []))}"
+                            for s in speeches
+                            if isinstance(s, dict)
+                        )
+                        words = full_text.split()
+                        for idx, i in enumerate(range(0, len(words), 400)):
+                            piece = " ".join(words[i : i + 450])
+                            collected_chunks.append(
+                                {
+                                    "chunk_id": f"{clean_ticker}_{t_yr}_Q{t_q}_FINNHUB_{idx}",
+                                    "chunk_text": piece,
+                                    "ticker": clean_ticker,
+                                    "year": t_yr or (target_year or 2025),
+                                    "section": f"Earnings Call Q{t_q}",
+                                    "source_type": "earnings_call",
+                                }
+                            )
+                    break
+        except Exception:
+            pass
+
+    # 3. Check indexed 8-K Item 2.02 (Exhibit 99.1 Earnings Releases) in ChromaDB
+    if not collected_chunks:
+        indexed_8k = search_filings(
+            query=query or f"{clean_ticker} quarterly revenue gross margin CEO CFO commentary",
+            ticker=clean_ticker,
+            year=target_year,
+            section="Item 2.02",
+            k=k,
+        )
+        for item in indexed_8k:
+            if item.get("section") == "Item 2.02":
+                item["source_type"] = "earnings_release_8k"
+                collected_chunks.append(item)
+
+    # 4. Live SEC EDGAR 8-K Exhibit 99.1 Earnings Release fallback via edgartools
+    if not collected_chunks:
+        try:
+            company = Company(clean_ticker)
+            filings_8k = company.get_filings(form="8-K")
+            fetched_releases = 0
+            for f in filings_8k:
+                f_yr = f.filing_date.year
+                if target_year and f_yr != target_year:
+                    continue
+                try:
+                    obj = f.obj()
+                    items_list = getattr(obj, "items", []) or []
+                    has_pr = getattr(obj, "has_press_release", False)
+                    if "Item 2.02" not in items_list and not has_pr:
+                        continue
+                    text_blocks: list[str] = []
+                    if has_pr and getattr(obj, "press_releases", None):
+                        for pr in obj.press_releases:
+                            pr_txt = str(pr.text() or "").strip()
+                            if pr_txt:
+                                text_blocks.append(pr_txt)
+                    if not text_blocks and "Item 2.02" in items_list:
+                        text_blocks.append(str(obj["Item 2.02"] or "").strip())
+
+                    combined = "\n\n".join(t for t in text_blocks if t)
+                    if not combined:
+                        continue
+
+                    acc_short = str(f.accession_no).split("-")[-1]
+                    words = combined.split()
+                    for idx, i in enumerate(range(0, len(words), 420)):
+                        piece = " ".join(words[i : i + 480])
+                        collected_chunks.append(
+                            {
+                                "chunk_id": f"{clean_ticker}_{f_yr}_8-K_{acc_short}_Item2.02_{idx}",
+                                "chunk_text": piece,
+                                "ticker": clean_ticker,
+                                "year": f_yr,
+                                "section": "Item 2.02",
+                                "source_type": "earnings_release_8k",
+                            }
+                        )
+                    fetched_releases += 1
+                    if fetched_releases >= 3:
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    if not collected_chunks:
+        return []
+
+    # Rank chunks by BM25 relevance if a query was provided
+    if query and len(collected_chunks) > k:
+        tokenized_docs = [_tokenize(c["chunk_text"]) for c in collected_chunks]
+        q_tokens = _tokenize(query)
+        if q_tokens and any(tokenized_docs):
+            bm25 = BM25Okapi(tokenized_docs)
+            scores = bm25.get_scores(q_tokens)
+            ranked = sorted(
+                zip(scores, collected_chunks), key=lambda x: x[0], reverse=True
+            )
+            return [item for _, item in ranked[:k]]
+
+    return collected_chunks[:k]
 
 
 def calculator(expression: str) -> float:
