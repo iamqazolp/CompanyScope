@@ -28,6 +28,7 @@ from src.tools import (
     calculator,
     get_earnings_transcripts,
     get_financial_data,
+    get_market_sentiment,
     search_filings,
 )
 
@@ -282,6 +283,27 @@ TOOLS_LIST: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "get_market_sentiment",
+            "description": "Fetches public market sentiment, Reddit discussions (r/stocks, r/investing, r/wallstreetbets), and recent Yahoo Finance news headlines for a given company ticker.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "The stock ticker symbol, e.g., AAPL",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional topic or keyword filter (e.g., 'AI iPhone sales', 'valuation')",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "calculator",
             "description": "Safely evaluates simple arithmetic expressions (+, -, *, /, %, ()).",
             "parameters": {
@@ -302,6 +324,7 @@ TOOL_FUNCTIONS: dict[str, Any] = {
     "get_financial_data": get_financial_data,
     "search_filings": search_filings,
     "get_earnings_transcripts": get_earnings_transcripts,
+    "get_market_sentiment": get_market_sentiment,
     "calculator": calculator,
 }
 

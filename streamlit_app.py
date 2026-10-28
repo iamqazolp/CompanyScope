@@ -43,6 +43,13 @@ st.markdown(
         border-radius: 6px;
         margin-bottom: 8px;
     }
+    .citation-card-sent {
+        padding: 10px 14px;
+        border-left: 4px solid #f59e0b;
+        background-color: rgba(245, 158, 11, 0.08);
+        border-radius: 6px;
+        margin-bottom: 8px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -179,6 +186,14 @@ with st.sidebar:
         st.session_state.current_query = (
             f"What does {ticker} say about supply chain and cybersecurity risks?"
         )
+    if st.button(f"🎙️ {ticker} Earnings Release & CEO Commentary", use_container_width=True):
+        st.session_state.current_query = (
+            f"What did {ticker}'s CEO and CFO highlight in the 2025 earnings releases?"
+        )
+    if st.button(f"💬 {ticker} Reddit & News Market Sentiment", use_container_width=True):
+        st.session_state.current_query = (
+            f"What is the recent Reddit social media sentiment and financial news buzz around {ticker}?"
+        )
     if st.button("🚫 Hallucination Guard Test", use_container_width=True):
         st.session_state.current_query = f"What is {ticker}'s secret car project?"
 
@@ -256,12 +271,33 @@ def render_message_extras(msg: dict[str, Any]) -> None:
                         f"</div>",
                         unsafe_allow_html=True,
                     )
-                elif c_type == "narrative":
+                elif c_type in ("narrative", "earnings", "sentiment"):
+                    sec_label = str(cit.get("section") or "")
+                    is_sent = (
+                        c_type == "sentiment"
+                        or "reddit" in sec_label.lower()
+                        or "news" in sec_label.lower()
+                    )
+                    is_earn = (
+                        c_type == "earnings"
+                        or "2.02" in sec_label.lower()
+                        or "earnings" in sec_label.lower()
+                    )
+                    card_cls = "citation-card-sent" if is_sent else "citation-card-nar"
+                    badge_title = (
+                        "Social & News Sentiment"
+                        if is_sent
+                        else (
+                            "Earnings Release / Call Quote"
+                            if is_earn
+                            else "SEC Filing Quote"
+                        )
+                    )
                     st.markdown(
-                        f'<div class="citation-card-nar">'
-                        f"<strong>{idx}. SEC Filing Quote</strong> • "
+                        f'<div class="{card_cls}">'
+                        f"<strong>{idx}. {badge_title}</strong> • "
                         f"<code>{cit.get('ticker')}</code> | "
-                        f"<strong>{cit.get('section')} ({cit.get('year')})</strong> | "
+                        f"<strong>{sec_label} ({cit.get('year')})</strong> | "
                         f"Chunk: <code>{cit.get('chunk_id')}</code><br/>"
                         f'<em>"{cit.get("quote")}"</em>'
                         f"</div>",

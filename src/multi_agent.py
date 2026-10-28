@@ -30,6 +30,9 @@ QUAL_TOOLS = [
     for t in TOOLS_LIST
     if t["function"]["name"] in ("search_filings", "get_earnings_transcripts")
 ]
+SENTIMENT_TOOLS = [
+    t for t in TOOLS_LIST if t["function"]["name"] in ("get_market_sentiment",)
+]
 
 QUANT_SYSTEM_PROMPT = """You are the Quantitative XBRL Financial Sub-Agent for CompanyScope.
 Your sole responsibility is to fetch authoritative numeric financial metrics from SEC 10-K filings using `get_financial_data` and perform exact calculations using `calculator`.
@@ -63,6 +66,30 @@ Rules:
       "year": 2024,
       "section": "Item 1A",
       "chunk_id": "AAPL_2024_10-K_Item1A_0",
+      "quote": "Exact verbatim substring from chunk_text."
+    }
+  ],
+  "needs_clarification": ""
+}
+"""
+
+SENTIMENT_SYSTEM_PROMPT = """You are the Market Sentiment & Financial News Sub-Agent for CompanyScope.
+Your sole responsibility is to fetch public retail investor discussions (Reddit r/stocks, r/investing, r/wallstreetbets) and recent financial news headlines (Yahoo Finance) using `get_market_sentiment` and extract exact verbatim quotes.
+
+Rules:
+- ALWAYS call `get_market_sentiment` for the assigned ticker.
+- Clearly frame findings as public market sentiment / news commentary (distinct from audited SEC filings).
+- Every citation's `"quote"` field MUST be an exact, contiguous verbatim substring copied character-for-character from `chunk_text`.
+- Output ONLY a valid JSON object matching this schema:
+{
+  "answer": "Detailed market sentiment and news analysis incorporating exact verbatim quotes.",
+  "citations": [
+    {
+      "type": "sentiment",
+      "ticker": "AAPL",
+      "year": 2026,
+      "section": "Reddit (r/stocks)",
+      "chunk_id": "AAPL_2026_REDDIT_abc123",
       "quote": "Exact verbatim substring from chunk_text."
     }
   ],
@@ -149,16 +176,25 @@ def classify_needed_specialists(question: str) -> list[str]:
         "transcript", "press release", "ceo", "cfo", "guidance", "commentary",
     )
 
+    sentiment_keywords = (
+        "sentiment", "reddit", "social media", "wallstreetbets", "wsb",
+        "news", "headline", "retail investor", "chatter", "buzz", "public opinion",
+        "what are people saying", "what do investors think",
+    )
+
     needs_quant = any(kw in q_lower for kw in quant_keywords)
     needs_qual = any(kw in q_lower for kw in qual_keywords)
+    needs_sentiment = any(kw in q_lower for kw in sentiment_keywords)
 
-    if needs_quant and needs_qual:
-        return ["quant", "qual"]
-    elif needs_quant:
-        return ["quant"]
-    elif needs_qual:
-        return ["qual"]
-    return ["quant", "qual"]
+    roles: list[str] = []
+    if needs_quant:
+        roles.append("quant")
+    if needs_qual:
+        roles.append("qual")
+    if needs_sentiment:
+        roles.append("sentiment")
+
+    return roles if roles else ["quant", "qual"]
 
 
 def _run_sub_agent(
@@ -169,8 +205,15 @@ def _run_sub_agent(
     model: str | None = None,
 ) -> dict[str, Any]:
     """Executes a single specialized sub-agent (quant or qual) for a specific ticker with self-correction."""
-    sys_prompt = QUANT_SYSTEM_PROMPT if role == "quant" else QUAL_SYSTEM_PROMPT
-    tools_subset = QUANT_TOOLS if role == "quant" else QUAL_TOOLS
+    if role == "quant":
+        sys_prompt = QUANT_SYSTEM_PROMPT
+        tools_subset = QUANT_TOOLS
+    elif role == "sentiment":
+        sys_prompt = SENTIMENT_SYSTEM_PROMPT
+        tools_subset = SENTIMENT_TOOLS
+    else:
+        sys_prompt = QUAL_SYSTEM_PROMPT
+        tools_subset = QUAL_TOOLS
     agent_label = f"{role.upper()}_{ticker}"
     lf = _get_langfuse()
 
@@ -242,6 +285,7 @@ def _run_sub_agent(
                             "get_financial_data",
                             "search_filings",
                             "get_earnings_transcripts",
+                            "get_market_sentiment",
                         ) and not fn_args.get("ticker"):
                             fn_args["ticker"] = ticker
 
