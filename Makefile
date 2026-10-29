@@ -21,6 +21,9 @@ lint:
 typecheck:
 	mypy src/ --ignore-missing-imports
 
+test:
+	pytest tests/test_data_sources.py -v
+
 eval:
 	pytest tests/test_eval.py -v --json-report --json-report-file=report.json
 	python scripts/check_thresholds.py report.json

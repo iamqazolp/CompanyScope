@@ -2,7 +2,7 @@ name: AI CI
 
 on:
   push:
-    branches: [ "main", "feat/multi-agent", "experiment-raptor" ]
+    branches: [ "main", "feat/multi-agent", "feat/data-sources", "experiment-raptor" ]
   pull_request:
     branches: [ "main" ]
 
@@ -40,6 +40,9 @@ jobs:
 
       - name: Build ChromaDB Vector Index
         run: python -m src.embed
+
+      - name: Run Data Sources & Guard Tests
+        run: pytest tests/test_data_sources.py -v
 
       - name: Run Pytest with JSON Report
         continue-on-error: true
