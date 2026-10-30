@@ -9,7 +9,6 @@ dependencies = [
     "chromadb>=1.5.9",
     "edgartools>=5.36.0",
     "fastapi>=0.136.3",
-    "groq>=1.4.0",
     "langfuse>=4.7.1",
     "mypy>=2.1.0",
     "pandas>=3.0.3",

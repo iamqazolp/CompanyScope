@@ -15,7 +15,6 @@ from src.config import (
     CORS_ALLOW_ORIGINS,
     DEFAULT_TICKER,
     EMBEDDING_MODEL,
-    GROQ_MODEL,
     INGEST_YEARS,
     LANGFUSE_PUBLIC_KEY,
     LANGFUSE_SECRET_KEY,
@@ -92,11 +91,10 @@ class IngestRequest(BaseModel):
 
 @app.get("/health")
 def health_check() -> dict[str, Any]:
-    active_model = OPENAI_MODEL if LLM_PROVIDER == "openai" else GROQ_MODEL
     return {
         "status": "ok",
         "provider": LLM_PROVIDER,
-        "model": active_model,
+        "model": OPENAI_MODEL,
         "langfuse_enabled": bool(LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY),
         "multi_agent_enabled": True,
     }

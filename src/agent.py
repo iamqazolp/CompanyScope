@@ -7,7 +7,6 @@ import uuid
 from typing import Any
 
 import requests
-from groq import Groq
 
 from src.config import (
     DEFAULT_TICKER,
@@ -15,13 +14,9 @@ from src.config import (
     GPT6_LUNA_CACHED_INPUT_PRICE_PER_1M,
     GPT6_LUNA_INPUT_PRICE_PER_1M,
     GPT6_LUNA_OUTPUT_PRICE_PER_1M,
-    GROQ_API_KEY,
-    GROQ_MODEL,
-    GROQ_TIMEOUT,
     LANGFUSE_HOST,
     LANGFUSE_PUBLIC_KEY,
     LANGFUSE_SECRET_KEY,
-    LLM_PROVIDER,
     LLM_TIMEOUT,
     OPENAI_KEY,
     OPENAI_MODEL,
@@ -29,18 +24,16 @@ from src.config import (
     propagate_trace_attributes,
 )
 from src.guard import check_citations, verify_citations
-from src.tools import calculator, get_financial_data, search_filings
+from src.tools import (
+    calculator,
+    get_earnings_transcripts,
+    get_financial_data,
+    get_market_sentiment,
+    search_filings,
+)
 
-_groq_client: Groq | None = None
 _http_session: requests.Session | None = None
 _langfuse_client: Any = None
-
-
-def _get_groq_client() -> Groq:
-    global _groq_client
-    if _groq_client is None:
-        _groq_client = Groq(api_key=GROQ_API_KEY)
-    return _groq_client
 
 
 def _get_http_session() -> requests.Session:
@@ -211,7 +204,7 @@ TOOLS_LIST: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_financial_data",
-            "description": "Fetches exact financial facts (e.g., 'Revenues', 'NetIncomeLoss', 'OperatingIncomeLoss', 'Assets', 'Liabilities', 'StockholdersEquity', 'OperatingCashFlow', 'FreeCashFlow') for a given company and year.",
+            "description": "Fetches exact XBRL financial facts (e.g., 'Revenues', 'NetIncomeLoss', 'OperatingIncomeLoss', 'GrossProfit', 'ResearchAndDevelopmentExpense', 'SellingGeneralAndAdministrativeExpense', 'EarningsPerShareDiluted', 'Assets', 'Liabilities', 'StockholdersEquity', 'CashAndCashEquivalents', 'LongTermDebt', 'OperatingCashFlow', 'CapitalExpenditures', 'FreeCashFlow', 'Dividends', 'ShareRepurchases', or segment labels like 'iPhone', 'Services') for a given company and year.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -221,7 +214,7 @@ TOOLS_LIST: list[dict[str, Any]] = [
                     },
                     "concept": {
                         "type": "string",
-                        "description": "The financial concept to fetch, e.g., Revenues, NetIncomeLoss, Assets, Liabilities",
+                        "description": "The financial concept to fetch, e.g., Revenues, NetIncomeLoss, GrossProfit, ResearchAndDevelopmentExpense, Assets, Liabilities, OperatingCashFlow, FreeCashFlow",
                     },
                     "year": {
                         "type": "string",
@@ -236,7 +229,7 @@ TOOLS_LIST: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "search_filings",
-            "description": "Performs a hybrid semantic + lexical search over SEC filings (10-K, 10-Q) to retrieve narrative chunks and section summaries.",
+            "description": "Performs a hybrid semantic + lexical search over SEC filings (10-K, 10-Q, and 8-K Item 2.02 earnings releases) to retrieve narrative chunks and section summaries.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -251,10 +244,60 @@ TOOLS_LIST: list[dict[str, Any]] = [
                     },
                     "section": {
                         "type": "string",
-                        "description": "Optional section filter (e.g., 'Item 1', 'Item 1A', 'Item 7', 'Item 7A')",
+                        "description": "Optional section filter (e.g., 'Item 1', 'Item 1A', 'Item 7', 'Item 7A', 'Item 2', 'Item 2.02')",
                     },
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_earnings_transcripts",
+            "description": "Fetches earnings call transcripts and SEC 8-K Item 2.02 (Exhibit 99.1) quarterly earnings releases containing CEO/CFO remarks, quarterly records, and guidance.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "The stock ticker symbol, e.g., AAPL",
+                    },
+                    "year": {
+                        "type": "string",
+                        "description": "Optional year filter, e.g., '2025'",
+                    },
+                    "quarter": {
+                        "type": "string",
+                        "description": "Optional quarter filter (e.g., '1', '2', '3', '4')",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional search query to rank relevant remarks (e.g., 'CEO guidance gross margin iPhone')",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_market_sentiment",
+            "description": "Fetches public market sentiment, Reddit discussions (r/stocks, r/investing, r/wallstreetbets), and recent Yahoo Finance news headlines for a given company ticker.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "The stock ticker symbol, e.g., AAPL",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional topic or keyword filter (e.g., 'AI iPhone sales', 'valuation')",
+                    },
+                },
+                "required": ["ticker"],
             },
         },
     },
@@ -280,6 +323,8 @@ TOOLS_LIST: list[dict[str, Any]] = [
 TOOL_FUNCTIONS: dict[str, Any] = {
     "get_financial_data": get_financial_data,
     "search_filings": search_filings,
+    "get_earnings_transcripts": get_earnings_transcripts,
+    "get_market_sentiment": get_market_sentiment,
     "calculator": calculator,
 }
 
@@ -328,153 +373,82 @@ def _call_llm(
     obs_name: str = "llm_chat_completion",
 ) -> tuple[dict[str, Any], str]:
     """
-    Calls the configured LLM provider (OpenAI-compatible endpoint with gpt-6-luna by default,
-    or Groq) and records a child generation in Langfuse with exact usage_details and cost_details.
+    Calls the configured OpenAI-compatible LLM provider (gpt-6-luna by default)
+    and records a child generation in Langfuse with exact usage_details and cost_details.
     """
-    active_provider = (provider or LLM_PROVIDER).lower()
+    if not OPENAI_KEY:
+        raise RuntimeError("OPENAI_KEY is not configured.")
+
     lf = _get_langfuse()
     active_tools = tools_override if tools_override is not None else TOOLS_LIST
-
-    if active_provider == "openai" and OPENAI_KEY:
-        active_model = model or OPENAI_MODEL
-        url = f"{OPENAI_URL}/v1/chat/completions"
-        payload: dict[str, Any] = {
-            "model": active_model,
-            "messages": messages,
-            "temperature": 0.0,
-        }
-        if use_tools and active_tools:
-            payload["tools"] = active_tools
-            payload["tool_choice"] = "auto"
-
-        session = _get_http_session()
-        last_err: Exception | None = None
-        with _obs_context(
-            lf,
-            as_type="generation",
-            name=obs_name,
-            model=active_model,
-            input=messages,
-            model_parameters={"temperature": 0.0, "use_tools": use_tools},
-        ) as gen:
-            for attempt in range(2):
-                try:
-                    resp = session.post(
-                        url,
-                        headers={
-                            "Authorization": f"Bearer {OPENAI_KEY}",
-                            "Content-Type": "application/json",
-                        },
-                        json=payload,
-                        timeout=LLM_TIMEOUT,
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    msg = data["choices"][0]["message"]
-                    raw_usage = data.get("usage")
-                    result_msg: dict[str, Any] = {
-                        "content": msg.get("content") or "",
-                        "tool_calls": msg.get("tool_calls") or [],
-                    }
-                    usage_details, cost_details = compute_gpt6_luna_usage_and_cost(
-                        raw_usage,
-                        fallback_input_text=json.dumps(messages),
-                        fallback_output_text=json.dumps(result_msg),
-                        model_name=active_model,
-                    )
-                    result_msg["_usage_details"] = usage_details
-                    result_msg["_cost_details"] = cost_details
-
-                    if gen is not None:
-                        try:
-                            gen.update(
-                                output={
-                                    "content": result_msg["content"],
-                                    "tool_calls": result_msg["tool_calls"],
-                                },
-                                usage_details=usage_details,
-                                cost_details=cost_details,
-                            )
-                        except Exception:
-                            pass
-                    return result_msg, active_model
-                except Exception as e:
-                    last_err = e
-                    if attempt == 0:
-                        time.sleep(1.0)
-
-        if not GROQ_API_KEY:
-            raise RuntimeError(f"OpenAI call failed: {last_err}")
-
-    # Groq provider (primary if configured, or automatic fallback)
-    active_model = (
-        model if (model and active_provider == "groq") else GROQ_MODEL
-    )
-    groq_client = _get_groq_client()
-    kwargs: dict[str, Any] = {
+    active_model = model or OPENAI_MODEL
+    url = f"{OPENAI_URL}/v1/chat/completions"
+    payload: dict[str, Any] = {
         "model": active_model,
         "messages": messages,
-        "timeout": GROQ_TIMEOUT,
         "temperature": 0.0,
     }
     if use_tools and active_tools:
-        kwargs["tools"] = active_tools
-        kwargs["tool_choice"] = "auto"
-        kwargs["parallel_tool_calls"] = False
+        payload["tools"] = active_tools
+        payload["tool_choice"] = "auto"
 
+    session = _get_http_session()
+    last_err: Exception | None = None
     with _obs_context(
         lf,
         as_type="generation",
         name=obs_name,
         model=active_model,
         input=messages,
+        model_parameters={"temperature": 0.0, "use_tools": use_tools},
     ) as gen:
-        response = groq_client.chat.completions.create(**kwargs)
-        message = response.choices[0].message
-        normalized_tool_calls: list[dict[str, Any]] = []
-        if message.tool_calls:
-            for tc in message.tool_calls:
-                normalized_tool_calls.append(
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                )
-        result_msg = {
-            "content": message.content or "",
-            "tool_calls": normalized_tool_calls,
-        }
-        raw_groq_usage = None
-        if getattr(response, "usage", None) is not None:
-            raw_groq_usage = {
-                "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
-                "completion_tokens": getattr(response.usage, "completion_tokens", 0),
-            }
-        usage_details, cost_details = compute_gpt6_luna_usage_and_cost(
-            raw_groq_usage,
-            fallback_input_text=json.dumps(messages),
-            fallback_output_text=json.dumps(result_msg),
-            model_name=active_model,
-        )
-        result_msg["_usage_details"] = usage_details
-        result_msg["_cost_details"] = cost_details
-        if gen is not None:
+        for attempt in range(2):
             try:
-                gen.update(
-                    output={
-                        "content": result_msg["content"],
-                        "tool_calls": result_msg["tool_calls"],
+                resp = session.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {OPENAI_KEY}",
+                        "Content-Type": "application/json",
                     },
-                    usage_details=usage_details,
-                    cost_details=cost_details,
+                    json=payload,
+                    timeout=LLM_TIMEOUT,
                 )
-            except Exception:
-                pass
-        return result_msg, active_model
+                resp.raise_for_status()
+                data = resp.json()
+                msg = data["choices"][0]["message"]
+                raw_usage = data.get("usage")
+                result_msg: dict[str, Any] = {
+                    "content": msg.get("content") or "",
+                    "tool_calls": msg.get("tool_calls") or [],
+                }
+                usage_details, cost_details = compute_gpt6_luna_usage_and_cost(
+                    raw_usage,
+                    fallback_input_text=json.dumps(messages),
+                    fallback_output_text=json.dumps(result_msg),
+                    model_name=active_model,
+                )
+                result_msg["_usage_details"] = usage_details
+                result_msg["_cost_details"] = cost_details
+
+                if gen is not None:
+                    try:
+                        gen.update(
+                            output={
+                                "content": result_msg["content"],
+                                "tool_calls": result_msg["tool_calls"],
+                            },
+                            usage_details=usage_details,
+                            cost_details=cost_details,
+                        )
+                    except Exception:
+                        pass
+                return result_msg, active_model
+            except Exception as e:
+                last_err = e
+                if attempt == 0:
+                    time.sleep(1.0)
+
+    raise RuntimeError(f"OpenAI call failed: {last_err}")
 
 
 def perform_fallback_rag(
@@ -565,9 +539,7 @@ def process_query(
     tool_trace: list[dict[str, Any]] = []
     self_correction_count = 0
     total_cost_usd = 0.0
-    active_model_used = model or (
-        OPENAI_MODEL if LLM_PROVIDER == "openai" else GROQ_MODEL
-    )
+    active_model_used = model or OPENAI_MODEL
 
     lf = _get_langfuse()
     trace_url: str | None = None
