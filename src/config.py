@@ -8,7 +8,12 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
-APP_VERSION = os.getenv("APP_VERSION", "0.2.0")
+IS_SERVERLESS = bool(os.getenv("VERCEL") or not os.access(PROJECT_ROOT, os.W_OK))
+if IS_SERVERLESS:
+    os.environ.setdefault("EDGAR_LOCAL_DATA_DIR", "/tmp/edgar_data")
+    os.environ.setdefault("HOME", "/tmp")
+
+APP_VERSION = os.getenv("APP_VERSION", "0.3.0")
 
 
 def _get_int(name: str, default: int) -> int:
@@ -63,21 +68,46 @@ FMP_API_KEY = os.getenv("FMP_API_KEY", "")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
 
 # Embedding & Vector Store Configuration
+GEMINI_API_KEY = (
+    os.getenv("GEMINI_API_KEY")
+    or os.getenv("GOOGLE_API_KEY")
+    or ""
+).strip()
+GEMINI_EMBEDDING_MODEL = os.getenv(
+    "GEMINI_EMBEDDING_MODEL", "gemini-embedding-2"
+).strip()
+GEMINI_EMBEDDING_DIM = _get_int("GEMINI_EMBEDDING_DIM", 768)
+
+# Cloud Postgres (Vercel Neon / Supabase / Standard Postgres)
+DATABASE_URL = (
+    os.getenv("DATABASE_URL")
+    or os.getenv("POSTGRES_URL")
+    or os.getenv("NEON_DATABASE_URL")
+    or ""
+).strip()
+
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "narratives")
+BUNDLED_CHUNKS_FILE = PROJECT_ROOT / "data" / "processed" / "chunks.jsonl"
+_DEFAULT_DATA_ROOT = (
+    Path("/tmp/companyscope") if IS_SERVERLESS else (PROJECT_ROOT / "data")
+)
 CHROMA_PATH = _resolve_path("CHROMA_PATH", PROJECT_ROOT / "chroma_db")
 CHUNKS_FILE = _resolve_path(
-    "CHUNKS_FILE", PROJECT_ROOT / "data" / "processed" / "chunks.jsonl"
+    "CHUNKS_FILE", _DEFAULT_DATA_ROOT / "processed" / "chunks.jsonl"
 )
-RAW_DIR = _resolve_path("RAW_DIR", PROJECT_ROOT / "data" / "raw")
-PROCESSED_DIR = _resolve_path("PROCESSED_DIR", PROJECT_ROOT / "data" / "processed")
+RAW_DIR = _resolve_path("RAW_DIR", _DEFAULT_DATA_ROOT / "raw")
+PROCESSED_DIR = _resolve_path("PROCESSED_DIR", _DEFAULT_DATA_ROOT / "processed")
 SEARCH_RESULTS_LIMIT = _get_int("SEARCH_RESULTS_LIMIT", 4)
 CHUNK_SIZE = _get_int("CHUNK_SIZE", 500)
 CHUNK_OVERLAP = _get_int("CHUNK_OVERLAP", 50)
 
-# API & Rate Limiting Configuration
+# API, Guest Quota & Rate Limiting Configuration
 RATE_LIMIT_PER_MINUTE = _get_int("RATE_LIMIT_PER_MINUTE", 10)
+DAILY_QUERY_LIMIT = _get_int("DAILY_QUERY_LIMIT", 5)
+QUOTA_SECRET = os.getenv("QUOTA_SECRET", "companyscope-guest-quota-v1")
+ADMIN_INGEST_KEY = os.getenv("ADMIN_INGEST_KEY", "").strip()
 CORS_ALLOW_ORIGINS = _get_list("CORS_ALLOW_ORIGINS", "*")
 
 # Ingestion Defaults

@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 from bs4 import BeautifulSoup, Tag
-from edgar import Company, set_identity
 
 from src.config import (
     CHUNK_OVERLAP,
@@ -17,6 +16,7 @@ from src.config import (
     PROCESSED_DIR,
     RAW_DIR,
 )
+from edgar import Company, set_identity
 
 # Configure EDGAR identity (Required by SEC)
 set_identity(EDGAR_IDENTITY)
