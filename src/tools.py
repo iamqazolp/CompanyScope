@@ -5,7 +5,6 @@ import re
 from typing import Any
 import xml.etree.ElementTree as ET
 
-from edgar import Company, set_identity
 from rank_bm25 import BM25Okapi
 import requests
 
@@ -19,7 +18,22 @@ from src.config import (
     get_langfuse,
     obs_context,
 )
-from src.embed import build_index, get_collection, get_embedding_model
+from edgar import Company, set_identity
+from src.db import (
+    get_cached_financials,
+    has_ticker_chunks_pg,
+    hybrid_search_pg,
+    set_cached_financials,
+)
+from src.embed import (
+    _load_chunks_from_jsonl,
+    build_index,
+    get_collection,
+    get_embedding_model,
+    is_cloud_vector_enabled,
+    is_local_chroma_available,
+)
+from src.embeddings import embed_query_cloud, get_active_embedding_model_name
 from src.ingest import ingest_company
 
 # Configure EDGAR identity
@@ -374,7 +388,13 @@ def get_financial_data(ticker: str, concept: str, year: int | str) -> dict[str, 
 def get_company_financial_summary(
     ticker: str, years: list[int] | None = None
 ) -> list[dict[str, Any]]:
-    """Fetches a multi-year table of core financial metrics for dashboard visualization."""
+    """Fetches a multi-year table of core financial metrics for dashboard visualization (24h cached)."""
+    clean_ticker = ticker.upper().strip()
+    if years is None:
+        cached = get_cached_financials(clean_ticker)
+        if cached is not None:
+            return cached
+
     target_years = years or [2021, 2022, 2023, 2024, 2025]
     metrics = [
         ("Revenue", "Revenues"),
@@ -390,14 +410,87 @@ def get_company_financial_summary(
         row: dict[str, Any] = {"year": yr}
         has_any = False
         for label, concept_key in metrics:
-            res = get_financial_data(ticker, concept_key, yr)
+            res = get_financial_data(clean_ticker, concept_key, yr)
             val = res.get("value") if "error" not in res else None
             row[label] = val
             if isinstance(val, (int, float)):
                 has_any = True
         if has_any:
             rows.append(row)
+
+    if years is None and rows:
+        set_cached_financials(clean_ticker, rows)
     return rows
+
+
+def _bm25_jsonl_fallback(
+    query: str,
+    ticker: str | None,
+    year: str | int | None,
+    section: str | None,
+    k_limit: int,
+) -> list[dict[str, Any]]:
+    """Zero-DB lexical fallback over bundled/ingested chunks.jsonl when neither Postgres nor Chroma is active."""
+    rows = _load_chunks_from_jsonl(ticker_filter=ticker)
+    if not rows:
+        return []
+    year_int: int | None = None
+    if year is not None and str(year).strip():
+        try:
+            year_int = int(str(year).strip())
+        except ValueError:
+            year_int = None
+
+    sec_clean: str | None = None
+    if section and str(section).strip():
+        sec_clean = str(section).strip()
+        if not sec_clean.lower().startswith("item"):
+            sec_clean = f"Item {sec_clean}"
+
+    filtered = [
+        r
+        for r in rows
+        if (year_int is None or int(r["year"]) == year_int)
+        and (sec_clean is None or str(r["section"]) == sec_clean)
+    ]
+    if not filtered and sec_clean is not None:
+        filtered = [
+            r for r in rows if (year_int is None or int(r["year"]) == year_int)
+        ]
+    if not filtered:
+        return []
+
+    tokenized = [_tokenize(r["chunk_text"]) for r in filtered]
+    q_tokens = _tokenize(query)
+    if not q_tokens or not any(tokenized):
+        return [
+            {
+                "chunk_text": r["chunk_text"],
+                "ticker": r["ticker"],
+                "year": r["year"],
+                "section": r["section"],
+                "chunk_id": r["chunk_id"],
+                "chunk_level": r.get("chunk_level", "leaf"),
+            }
+            for r in filtered[:k_limit]
+        ]
+
+    bm25 = BM25Okapi(tokenized)
+    scores = bm25.get_scores(q_tokens)
+    ranked = sorted(
+        zip(scores, filtered), key=lambda x: x[0], reverse=True
+    )[:k_limit]
+    return [
+        {
+            "chunk_text": r["chunk_text"],
+            "ticker": r["ticker"],
+            "year": r["year"],
+            "section": r["section"],
+            "chunk_id": r["chunk_id"],
+            "chunk_level": r.get("chunk_level", "leaf"),
+        }
+        for _, r in ranked
+    ]
 
 
 def search_filings(
@@ -408,12 +501,80 @@ def search_filings(
     k: int | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Performs a Hybrid RAG search (Dense Embeddings + BM25 Lexical Search with RRF fusion)
-    over the SEC filings ChromaDB collection, including RAPTOR-lite section summaries.
+    Performs a Hybrid RAG search (Dense Embeddings + Lexical Search with RRF fusion) over:
+    1. Cloud Postgres (pgvector + tsvector) with Gemini Embedding 2 when configured
+    2. Local ChromaDB + SentenceTransformers + BM25 in local dev
+    3. Bundled chunks.jsonl BM25 fallback in zero-DB environments.
     """
     try:
-        collection = get_collection()
         clean_ticker = str(ticker).upper().strip() if ticker else None
+        k_limit = int(k) if k is not None else SEARCH_RESULTS_LIMIT
+        lf = get_langfuse()
+
+        # 1. Cloud Vector Mode: Gemini Embedding 2 + Postgres (pgvector + tsvector RRF)
+        if is_cloud_vector_enabled():
+            if clean_ticker and clean_ticker not in _auto_ingested_tickers:
+                if not has_ticker_chunks_pg(clean_ticker):
+                    _auto_ingested_tickers.add(clean_ticker)
+                    try:
+                        existing_local = _load_chunks_from_jsonl(
+                            ticker_filter=clean_ticker
+                        )
+                        if not existing_local:
+                            target_yr = int(str(year).strip()) if year else None
+                            yrs_to_ingest = (
+                                [target_yr] if target_yr else [2023, 2024, 2025]
+                            )
+                            ingest_company(
+                                ticker=clean_ticker, years=yrs_to_ingest
+                            )
+                        build_index(ticker_filter=clean_ticker)
+                    except Exception as auto_err:
+                        print(
+                            f"Cloud auto-ingestion skipped for {clean_ticker}: {auto_err}"
+                        )
+
+            active_emb_model = get_active_embedding_model_name()
+            with obs_context(
+                lf,
+                as_type="embedding",
+                name="embed-search-query-gemini",
+                model=active_emb_model,
+                input={"query": query},
+                metadata={"provider": "google-gemini"},
+            ) as emb_obs:
+                q_vec = embed_query_cloud(query)
+                if emb_obs is not None:
+                    try:
+                        emb_obs.update(
+                            output={
+                                "dimensions": len(q_vec),
+                                "vector_preview": [round(v, 5) for v in q_vec[:5]],
+                            },
+                            usage_details={"input": len(_tokenize(query))},
+                        )
+                    except Exception:
+                        pass
+
+            pg_hits = hybrid_search_pg(
+                query=query,
+                query_vec=q_vec,
+                ticker=clean_ticker,
+                year=year,
+                section=section,
+                k_limit=k_limit,
+            )
+            if pg_hits:
+                return pg_hits
+
+        # 2. Zero-DB Serverless Fallback if local ChromaDB is not installed
+        if not is_local_chroma_available():
+            return _bm25_jsonl_fallback(
+                query, clean_ticker, year, section, k_limit
+            )
+
+        # 3. Local Dev Mode: ChromaDB + SentenceTransformers + BM25 RRF
+        collection = get_collection()
 
         # On-demand auto-ingestion if a requested ticker has 0 indexed chunks in ChromaDB
         if clean_ticker and clean_ticker not in _auto_ingested_tickers:
