@@ -442,8 +442,153 @@ def get_section_chunks_pg(
 
 
 # ---------------------------------------------------------------------------
-# XBRL Financial Summary Cache (24h TTL)
+# No-Login Daily Guest Quota (5 Queries / UTC Day)
+# ---------------------------------------------------------------------------
 
+
+def make_guest_cookie() -> str:
+    raw_id = uuid.uuid4().hex[:16]
+    sig = hmac.new(QUOTA_SECRET.encode(), raw_id.encode(), hashlib.sha256).hexdigest()[:16]
+    return f"{raw_id}.{sig}"
+
+
+def verify_guest_cookie(cookie_val: str | None) -> str | None:
+    if not cookie_val or "." not in cookie_val:
+        return None
+    raw_id, sig = cookie_val.split(".", 1)
+    expected = hmac.new(
+        QUOTA_SECRET.encode(), raw_id.encode(), hashlib.sha256
+    ).hexdigest()[:16]
+    if hmac.compare_digest(sig, expected):
+        return raw_id
+    return None
+
+
+def derive_quota_keys(client_ip: str, guest_id: str) -> tuple[str, str]:
+    """Returns (ip_key, cookie_key) hashed with HMAC-SHA256 so raw IPs are never stored."""
+    ip_norm = (client_ip or "unknown").strip().lower()
+    ip_hash = hmac.new(QUOTA_SECRET.encode(), f"ip:{ip_norm}".encode(), hashlib.sha256).hexdigest()[:24]
+    cookie_hash = hmac.new(QUOTA_SECRET.encode(), f"gid:{guest_id}".encode(), hashlib.sha256).hexdigest()[:24]
+    return f"ip_{ip_hash}", f"gid_{cookie_hash}"
+
+
+def _utc_today_and_reset() -> tuple[str, str]:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    today_str = now.date().isoformat()
+    tomorrow = datetime.datetime.combine(
+        now.date() + datetime.timedelta(days=1),
+        datetime.time(0, 0, 0, tzinfo=datetime.timezone.utc),
+    )
+    return today_str, tomorrow.isoformat()
+
+
+def get_quota_status(
+    client_ip: str,
+    guest_id: str,
+    daily_limit: int = DAILY_QUERY_LIMIT,
+) -> dict[str, Any]:
+    """Reads remaining daily queries without incrementing usage."""
+    ip_key, gid_key = derive_quota_keys(client_ip, guest_id)
+    today_str, reset_at = _utc_today_and_reset()
+    used = 0
+
+    if is_postgres_enabled():
+        try:
+            ensure_pg_schema()
+            with _get_pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT COALESCE(MAX(used_count), 0)
+                        FROM guest_quotas
+                        WHERE usage_date = %s::date AND quota_key IN (%s, %s);
+                        """,
+                        (today_str, ip_key, gid_key),
+                    )
+                    row = cur.fetchone()
+                    used = int(row[0]) if row and row[0] is not None else 0
+        except Exception:
+            used = 0
+    else:
+        conn = _get_sqlite_conn()
+        try:
+            row = conn.execute(
+                """
+                SELECT COALESCE(MAX(used_count), 0) AS m
+                FROM guest_quotas
+                WHERE usage_date = ? AND quota_key IN (?, ?);
+                """,
+                (today_str, ip_key, gid_key),
+            ).fetchone()
+            used = int(row["m"]) if row else 0
+        finally:
+            conn.close()
+
+    remaining = max(0, daily_limit - used)
+    return {
+        "limit": daily_limit,
+        "used": min(used, daily_limit),
+        "remaining": remaining,
+        "reset_at": reset_at,
+    }
+
+
+def consume_quota(
+    client_ip: str,
+    guest_id: str,
+    daily_limit: int = DAILY_QUERY_LIMIT,
+) -> tuple[bool, dict[str, Any]]:
+    """
+    Atomically checks and consumes 1 query against the daily guest limit across BOTH
+    hashed IP and signed guest cookie (preventing cookie-clearing bypasses).
+    """
+    status = get_quota_status(client_ip, guest_id, daily_limit=daily_limit)
+    if status["remaining"] <= 0:
+        return False, status
+
+    ip_key, gid_key = derive_quota_keys(client_ip, guest_id)
+    today_str, reset_at = _utc_today_and_reset()
+    keys = [ip_key] if ip_key == gid_key else [ip_key, gid_key]
+
+    if is_postgres_enabled():
+        ensure_pg_schema()
+        with _get_pg_conn() as conn:
+            with conn.cursor() as cur:
+                for k in keys:
+                    cur.execute(
+                        """
+                        INSERT INTO guest_quotas (quota_key, usage_date, used_count, updated_at)
+                        VALUES (%s, %s::date, 1, NOW())
+                        ON CONFLICT (quota_key, usage_date) DO UPDATE
+                        SET used_count = guest_quotas.used_count + 1, updated_at = NOW();
+                        """,
+                        (k, today_str),
+                    )
+    else:
+        now_ts = time.time()
+        conn = _get_sqlite_conn()
+        try:
+            for k in keys:
+                conn.execute(
+                    """
+                    INSERT INTO guest_quotas (quota_key, usage_date, used_count, updated_at)
+                    VALUES (?, ?, 1, ?)
+                    ON CONFLICT (quota_key, usage_date) DO UPDATE
+                    SET used_count = used_count + 1, updated_at = excluded.updated_at;
+                    """,
+                    (k, today_str, now_ts),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    updated = get_quota_status(client_ip, guest_id, daily_limit=daily_limit)
+    updated["reset_at"] = reset_at
+    return True, updated
+
+
+# ---------------------------------------------------------------------------
+# XBRL Financial Summary Cache (24h TTL) & Shareable Research Reports
 # ---------------------------------------------------------------------------
 
 
@@ -527,3 +672,105 @@ def set_cached_financials(ticker: str, rows: list[dict[str, Any]]) -> None:
         conn.close()
 
 
+def save_shared_report(
+    question: str,
+    tickers: list[str],
+    mode: str,
+    payload: dict[str, Any],
+    custom_slug: str | None = None,
+) -> str:
+    prefix = "-".join(t.lower() for t in tickers[:3]) if tickers else "report"
+    prefix = re.sub(r"[^a-z0-9-]+", "", prefix) or "report"
+    slug = custom_slug or f"{prefix}-{uuid.uuid4().hex[:8]}"
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    tickers_str = json.dumps(tickers)
+    payload_str = json.dumps(payload)
+
+    if is_postgres_enabled():
+        try:
+            ensure_pg_schema()
+            with _get_pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO shared_reports (slug, question, tickers_json, mode, payload_json, created_at)
+                        VALUES (%s, %s, %s::jsonb, %s, %s::jsonb, NOW())
+                        ON CONFLICT (slug) DO UPDATE
+                        SET payload_json = EXCLUDED.payload_json;
+                        """,
+                        (slug, question, tickers_str, mode, payload_str),
+                    )
+            return slug
+        except Exception:
+            pass
+
+    conn = _get_sqlite_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO shared_reports (slug, question, tickers_json, mode, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (slug) DO UPDATE SET payload_json = excluded.payload_json;
+            """,
+            (slug, question, tickers_str, mode, payload_str, now_iso),
+        )
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+    return slug
+
+
+def get_shared_report(slug: str) -> dict[str, Any] | None:
+    if is_postgres_enabled():
+        try:
+            ensure_pg_schema()
+            with _get_pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT slug, question, tickers_json, mode, payload_json, created_at
+                        FROM shared_reports
+                        WHERE slug = %s;
+                        """,
+                        (slug,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        s, q, tk, md, pl, cat = row
+                        return {
+                            "slug": s,
+                            "question": q,
+                            "tickers": json.loads(tk) if isinstance(tk, str) else tk,
+                            "mode": md,
+                            "result": json.loads(pl) if isinstance(pl, str) else pl,
+                            "created_at": cat.isoformat() if hasattr(cat, "isoformat") else str(cat),
+                        }
+        except Exception:
+            pass
+
+    conn = _get_sqlite_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT slug, question, tickers_json, mode, payload_json, created_at
+            FROM shared_reports
+            WHERE slug = ?;
+            """,
+            (slug,),
+        ).fetchone()
+        if row:
+            return {
+                "slug": row["slug"],
+                "question": row["question"],
+                "tickers": json.loads(row["tickers_json"]),
+                "mode": row["mode"],
+                "result": json.loads(row["payload_json"]),
+                "created_at": row["created_at"],
+            }
+    except Exception:
+        return None
+    finally:
+        conn.close()
+    return None

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import re
@@ -9,6 +10,7 @@ from src.agent import (
     TOOL_FUNCTIONS,
     TOOLS_LIST,
     _call_llm,
+    _emit_event,
     _extract_json,
     _get_langfuse,
     _obs_context,
@@ -203,8 +205,9 @@ def _run_sub_agent(
     question: str,
     provider: str | None = None,
     model: str | None = None,
+    event_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Executes a single specialized sub-agent (quant or qual) for a specific ticker with self-correction."""
+    """Executes a single specialized sub-agent (quant, qual, or sentiment) for a specific ticker."""
     if role == "quant":
         sys_prompt = QUANT_SYSTEM_PROMPT
         tools_subset = QUANT_TOOLS
@@ -215,6 +218,15 @@ def _run_sub_agent(
         sys_prompt = QUAL_SYSTEM_PROMPT
         tools_subset = QUAL_TOOLS
     agent_label = f"{role.upper()}_{ticker}"
+    _emit_event(
+        event_cb,
+        {
+            "type": "specialist_start",
+            "agent": agent_label,
+            "role": role,
+            "ticker": ticker,
+        },
+    )
     lf = _get_langfuse()
 
     messages: list[dict[str, Any]] = [
@@ -292,6 +304,17 @@ def _run_sub_agent(
                         obs_type = (
                             "retriever" if fn_name == "search_filings" else "tool"
                         )
+                        _emit_event(
+                            event_cb,
+                            {
+                                "type": "tool_call",
+                                "agent": agent_label,
+                                "ticker": ticker,
+                                "role": role,
+                                "tool": fn_name,
+                                "args": fn_args,
+                            },
+                        )
                         with _obs_context(
                             lf,
                             as_type=obs_type,
@@ -353,6 +376,17 @@ def _run_sub_agent(
                         continue
 
                     verified = verify_citations(parsed, tool_results_history)
+                    _emit_event(
+                        event_cb,
+                        {
+                            "type": "specialist_done",
+                            "agent": agent_label,
+                            "role": role,
+                            "ticker": ticker,
+                            "citations_count": len(verified.get("citations", [])),
+                            "self_corrections": self_corrections,
+                        },
+                    )
                     out_payload = {
                         "agent": agent_label,
                         "role": role,
@@ -422,6 +456,7 @@ def run_multi_agent_query(
     model: str | None = None,
     session_id: str | None = None,
     user_id: str | None = None,
+    event_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """
     Supervisor orchestrator that decomposes a query across companies and specialist roles
@@ -431,6 +466,15 @@ def run_multi_agent_query(
     start_time = time.time()
     target_tickers = detect_tickers(question, ticker, tickers)
     roles = classify_needed_specialists(question)
+    _emit_event(
+        event_cb,
+        {
+            "type": "plan",
+            "mode": "multi_agent",
+            "tickers": target_tickers,
+            "specialists": roles,
+        },
+    )
 
     lf = _get_langfuse()
     trace_url: str | None = None
@@ -473,6 +517,7 @@ def run_multi_agent_query(
                     question=question,
                     provider=provider,
                     model=model,
+                    event_cb=event_cb,
                 ): (r, t)
                 for r, t in tasks
             }
@@ -578,6 +623,14 @@ def run_multi_agent_query(
         )
 
         active_model_used = model or OPENAI_MODEL
+        _emit_event(
+            event_cb,
+            {
+                "type": "synthesizing",
+                "reports_count": len(sub_reports),
+                "tickers": target_tickers,
+            },
+        )
         try:
             synth_msg, active_model_used = _call_llm(
                 messages=synth_messages,
@@ -592,6 +645,15 @@ def run_multi_agent_query(
             parsed = _extract_json(synth_msg.get("content") or "{}")
             _valid_cits, invalid_cits = check_citations(
                 parsed, combined_tool_results
+            )
+            _emit_event(
+                event_cb,
+                {
+                    "type": "guard_check",
+                    "scope": "synthesis",
+                    "valid_count": len(_valid_cits),
+                    "invalid_count": len(invalid_cits),
+                },
             )
 
             if invalid_cits:

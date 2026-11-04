@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from contextlib import nullcontext
 import json
 import os
@@ -498,6 +499,16 @@ Please try to answer the user's question using ONLY this context. If the answer 
         return {"error": f"Fallback RAG failed: {str(e)}"}
 
 
+def _emit_event(
+    event_cb: Callable[[dict[str, Any]], None] | None, payload: dict[str, Any]
+) -> None:
+    if event_cb is not None:
+        try:
+            event_cb(payload)
+        except Exception:
+            pass
+
+
 def process_query(
     question: str,
     ticker: str = DEFAULT_TICKER,
@@ -506,6 +517,7 @@ def process_query(
     model: str | None = None,
     session_id: str | None = None,
     user_id: str | None = None,
+    event_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """
     Process query using LLM and tools with multi-turn support, citation verification,
@@ -513,6 +525,15 @@ def process_query(
     """
     start_time = time.time()
     ticker = (ticker or DEFAULT_TICKER).upper().strip()
+    _emit_event(
+        event_cb,
+        {
+            "type": "plan",
+            "mode": "single",
+            "tickers": [ticker],
+            "specialists": ["unified"],
+        },
+    )
 
     try:
         system_prompt = load_system_prompt()
@@ -602,6 +623,17 @@ def process_query(
                         obs_type = (
                             "retriever" if func_name == "search_filings" else "tool"
                         )
+                        _emit_event(
+                            event_cb,
+                            {
+                                "type": "tool_call",
+                                "agent": f"SINGLE_{ticker}",
+                                "ticker": ticker,
+                                "role": "unified",
+                                "tool": func_name,
+                                "args": func_args,
+                            },
+                        )
                         with _obs_context(
                             lf,
                             as_type=obs_type,
@@ -653,6 +685,15 @@ def process_query(
                         ):
                             _valid_cits, invalid_cits = check_citations(
                                 parsed, tool_results_history
+                            )
+                            _emit_event(
+                                event_cb,
+                                {
+                                    "type": "guard_check",
+                                    "scope": "single",
+                                    "valid_count": len(_valid_cits),
+                                    "invalid_count": len(invalid_cits),
+                                },
                             )
                             if invalid_cits and self_correction_count < 1:
                                 self_correction_count += 1
