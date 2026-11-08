@@ -68,42 +68,52 @@ flowchart TD
 ## Project Structure
 
 ```text
-company-scope/
+CompanyScope/
+├── app/                        # Next.js 15 App Router (Home terminal & /report/[slug] permalinks)
+├── components/                 # Equity Research Terminal, XBRL Chart, Source Inspector & Markdown UI
+├── lib/                        # Shared TypeScript interfaces & financial formatters
+├── api/
+│   └── index.py                # Vercel Fluid Compute Python ASGI entrypoint (maxDuration: 300s)
 ├── src/
-│   ├── app.py                  # FastAPI server (/health, /tickers, /ingest, /financials, /compare, /ask)
-│   ├── agent.py                # Single-agent tool-calling loop with Citation Guard retry
+│   ├── app.py                  # FastAPI server (/api/ask/stream SSE, /quota, /showcase, /reports, /ask)
+│   ├── agent.py                # Single-agent tool-calling loop with SSE events & Citation Guard retry
 │   ├── multi_agent.py          # Multi-Agent Supervisor (Quant, Qual & Sentiment + peer comparison)
+│   ├── embeddings.py           # Cloud Gemini Embedding 2 (768-dim MRL) REST client
+│   ├── db.py                   # Neon Postgres (pgvector + tsvector RRF, 5/day guest quota, XBRL cache)
+│   ├── showcase.py             # Pre-verified zero-quota showcase equity research reports
 │   ├── tools.py                # XBRL, Hybrid RAG, 8-K/earnings transcripts, sentiment & AST calculator
-│   ├── guard.py                # RapidFuzz narrative/earnings/sentiment & XBRL numeric citation verifier
+│   ├── guard.py                # RapidFuzz quote & XBRL numeric verifier with source context enrichment
 │   ├── ingest.py               # SEC EDGAR 10-K/10-Q/8-K (Ex. 99.1) parser, inline tables, RAPTOR-lite
-│   ├── embed.py                # ChromaDB indexer with collision-free accession chunk IDs
-│   ├── config.py               # Unified settings, Langfuse v4 helpers, and cost computation
+│   ├── embed.py                # Cloud pgvector / local ChromaDB dual-mode indexer
+│   ├── config.py               # Unified cloud/local settings, Langfuse v4 helpers, and cost computation
 │   └── model_pricing.json      # Per-1M token pricing registry (input, cached, cache write, output)
 ├── prompts/
 │   └── system.txt              # Grounded financial analyst system prompt
 ├── scripts/
+│   ├── seed_cloud.py           # CLI to ingest & index S&P 500 filings into Neon pgvector via Gemini
 │   ├── manage_model_pricing.py # CLI/interactive tool to update model rates & backfill Langfuse
 │   ├── backfill_langfuse_costs.py
 │   └── check_thresholds.py     # CI evaluation pass-rate gate (>= 90%)
 ├── tests/
 │   ├── eval_data.yaml          # Golden evaluation dataset
 │   ├── test_eval.py            # End-to-end golden evaluation benchmark (15 test cases)
-│   └── test_data_sources.py    # Unit & E2E tests for XBRL, 8-K earnings, sentiment & guard
-├── streamlit_app.py            # Streamlit Analyst Workspace UI
+│   ├── test_data_sources.py    # Unit & E2E tests for XBRL, 8-K earnings, sentiment & guard
+│   └── test_cloud_web.py       # Unit & SSE tests for 5/day quota, permalinks & Gemini Embedding 2
+├── vercel.json                 # Single-project Next.js + FastAPI Fluid Compute configuration
 ├── Dockerfile                  # Multi-service container image
-├── docker-compose.yml          # FastAPI + Streamlit orchestration
 └── Makefile                    # Developer workflow shortcuts
 ```
 
 ---
 
-## Quickstart
+## Quickstart (Local & Vercel Cloud)
 
 ### 1. Clone & Install Dependencies
 ```bash
 git clone https://github.com/iamqazolp/CompanyScope.git
 cd CompanyScope
-uv sync
+uv sync --all-extras
+npm install
 ```
 
 ### 2. Configure Environment Variables (`.env`)
@@ -114,13 +124,17 @@ OPENAI_URL=https://api.shopaikey.com
 OPENAI_KEY=your_openai_api_key
 OPENAI_MODEL=gpt-6-luna
 
-# SEC EDGAR identity (required by SEC fair-access policy)
+# Cloud Embeddings (Google AI Studio — gemini-embedding-2, 768-dim MRL)
+GOOGLE_AI_STUDIO_KEY=your_google_ai_studio_key
+GEMINI_EMBEDDING_MODEL=gemini-embedding-2
+
+# Cloud Vector & State Store (Vercel Neon Serverless Postgres with pgvector)
+DATABASE_URL=postgresql://user:pass@ep-xyz.us-east-2.aws.neon.tech/neondb?sslmode=require
+
+# SEC EDGAR identity & No-Login Daily Guest Quota
 EDGAR_IDENTITY=your_email@example.com
 DEFAULT_TICKER=AAPL
-
-# Optional: Earnings Call Transcript Providers (falls back to SEC 8-K Ex. 99.1)
-FMP_API_KEY=
-FINNHUB_API_KEY=
+DAILY_QUERY_LIMIT=5
 
 # Optional: Langfuse v4 Observability
 LANGFUSE_PUBLIC_KEY=pk-lf-...
@@ -128,38 +142,42 @@ LANGFUSE_SECRET_KEY=sk-lf-...
 LANGFUSE_BASE_URL=https://us.cloud.langfuse.com
 ```
 
-### 3. Ingest SEC Filings & Build the Hybrid Index
+### 3. Seed Index (Cloud `pgvector` or Local `ChromaDB`)
 ```bash
-make ingest   # Downloads 10-K/10-Q/8-K (Ex. 99.1) filings and builds RAPTOR-lite + leaf chunks
-make index    # Indexes chunks into ChromaDB
+# Cloud Mode (Neon Postgres + Gemini Embedding 2)
+make seed-cloud
+
+# Or Local Dev Mode (ChromaDB + SentenceTransformers)
+make ingest && make index
 ```
 
-### 4. Launch the Backend & Analyst Workspace
+### 4. Launch the Next.js Research Terminal & FastAPI Backend
 ```bash
-# Terminal 1 — FastAPI Backend (http://localhost:8000)
+# Terminal 1 — FastAPI Backend with SSE Streaming (http://localhost:8000)
 make api
 
-# Terminal 2 — Streamlit Analyst Dashboard (http://localhost:8501)
-make ui
+# Terminal 2 — Next.js 15 Equity Research Terminal (http://localhost:3000)
+make web
 ```
 
-Or run both services via **Docker Compose**:
-```bash
-docker compose up --build
-```
+To deploy both frontend and backend as a **single Vercel project**, connect the repository in Vercel, attach **Neon Serverless Postgres** from the Vercel Storage tab, set the environment variables above, and deploy.
 
 ---
 
-## API Reference
+## API Reference (`/api/*`)
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/health` | Active LLM provider, model, Langfuse status, and service health |
-| `GET` | `/tickers` | Indexed tickers, chunk counts, filing years, and sections in ChromaDB |
-| `POST` | `/ingest` | On-demand SEC EDGAR download (`10-K`/`10-Q`/`8-K`) and ChromaDB indexing for any ticker |
-| `GET` | `/financials/{ticker}` | Multi-year structured `10-K` XBRL financial metrics for charting |
-| `POST` | `/compare` | Concurrent multi-agent peer comparison across multiple tickers |
-| `POST` | `/ask` | Run a `single`, `multi_agent`, or `auto` query across one or more tickers |
+| `GET` | `/api/health` | Active LLM, embedding model (`gemini-embedding-2`), vector backend, and service health |
+| `GET` | `/api/quota` | Remaining daily free guest queries (`5/day`, HMAC IP + signed cookie, no login) |
+| `GET` | `/api/showcase` | Pre-verified zero-quota institutional showcase reports |
+| `GET` | `/api/reports/{slug}` | Fetch a saved shareable research report permalink |
+| `GET` | `/api/tickers` | Indexed tickers, chunk counts, filing years, and sections |
+| `GET` | `/api/financials/{ticker}` | 24h-cached multi-year structured `10-K` XBRL metrics for charting |
+| `POST` | `/api/ask/stream` | Real-time **Server-Sent Events (SSE)** stream of specialist steps, guard checks & result |
+| `POST` | `/api/ask` | Synchronous JSON query (`single`, `multi_agent`, or `auto`) |
+| `POST` | `/api/compare` | Concurrent multi-agent peer comparison across multiple tickers |
+| `POST` | `/api/ingest` | Admin-protected SEC EDGAR download (`10-K`/`10-Q`/`8-K`) and vector indexing |
 
 ### Example `POST /ask` Request (Multi-Agent Peer Comparison)
 ```json
