@@ -11,7 +11,11 @@ from src.config import (
 )
 
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-_FALLBACK_MODELS = [GEMINI_EMBEDDING_MODEL]
+_FALLBACK_MODELS = [
+    GEMINI_EMBEDDING_MODEL,
+    "gemini-embedding-2-preview",
+    "gemini-embedding-001",
+]
 
 _resolved_model: str | None = None
 
@@ -72,7 +76,10 @@ def embed_query_cloud(
                 time.sleep(1.5 * (attempt + 1))
                 continue
             if not resp.ok:
-                # Fail fast on unexpected 4xx payload schema mismatch
+                # Retry once without taskType if preview endpoint rejects taskType
+                if resp.status_code == 400 and "taskType" in payload:
+                    payload.pop("taskType", None)
+                    continue
                 raise RuntimeError(
                     f"Gemini embedContent error ({resp.status_code}): {resp.text[:300]}"
                 )

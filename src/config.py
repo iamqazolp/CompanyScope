@@ -70,6 +70,7 @@ FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
 # Embedding & Vector Store Configuration
 GEMINI_API_KEY = (
     os.getenv("GEMINI_API_KEY")
+    or os.getenv("GOOGLE_AI_STUDIO_KEY")
     or os.getenv("GOOGLE_API_KEY")
     or ""
 ).strip()
