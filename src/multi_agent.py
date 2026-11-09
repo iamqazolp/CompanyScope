@@ -17,10 +17,17 @@ from src.agent import (
 )
 from src.config import (
     DEFAULT_TICKER,
-    OPENAI_MODEL,
+    TIER1_MODEL,
+    TIER2_MODEL,
     propagate_trace_attributes,
 )
 from src.guard import check_citations, verify_citations
+from src.tier_router import (
+    TierDecision,
+    escalate_on_guard_failure,
+    resolve_subagent_tier,
+    resolve_supervisor_tier,
+)
 
 QUANT_TOOLS = [
     t
@@ -99,8 +106,8 @@ Rules:
 }
 """
 
-SYNTHESIZER_SYSTEM_PROMPT = """You are the Lead Financial Synthesizer Agent for CompanyScope.
-You receive verified findings and citations from specialized Quantitative (XBRL) and Qualitative (SEC Narrative) sub-agents across one or more companies.
+SYNTHESIZER_SYSTEM_PROMPT = """You are the Tier-1 Lead Financial Synthesizer Agent for CompanyScope.
+You receive verified findings and citations from specialized Quantitative (XBRL), Qualitative (SEC 10-K/10-Q/8-K Narrative), and Market Sentiment (Reddit & Financial News) sub-agents across one or more companies.
 
 Rules:
 - Synthesize the sub-agent reports into a cohesive, executive-grade comparative answer.
@@ -205,9 +212,10 @@ def _run_sub_agent(
     question: str,
     provider: str | None = None,
     model: str | None = None,
+    tier_decision: TierDecision | None = None,
     event_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Executes a single specialized sub-agent (quant, qual, or sentiment) for a specific ticker."""
+    """Executes a single specialized sub-agent (quant, qual, or sentiment) on Tier 2 (Luna) or escalated Tier 1 (Terra)."""
     if role == "quant":
         sys_prompt = QUANT_SYSTEM_PROMPT
         tools_subset = QUANT_TOOLS
@@ -217,6 +225,13 @@ def _run_sub_agent(
     else:
         sys_prompt = QUAL_SYSTEM_PROMPT
         tools_subset = QUAL_TOOLS
+
+    active_decision = tier_decision or resolve_subagent_tier(
+        question=question,
+        role=role,
+        tickers=[ticker],
+        explicit_model=model,
+    )
     agent_label = f"{role.upper()}_{ticker}"
     _emit_event(
         event_cb,
@@ -225,6 +240,10 @@ def _run_sub_agent(
             "agent": agent_label,
             "role": role,
             "ticker": ticker,
+            "model": active_decision.model,
+            "tier": active_decision.tier,
+            "escalated": active_decision.escalated,
+            "escalation_reason": active_decision.reason,
         },
     )
     lf = _get_langfuse()
@@ -247,13 +266,20 @@ def _run_sub_agent(
     tool_trace: list[dict[str, Any]] = []
     self_corrections = 0
     sub_cost_usd = 0.0
-    active_model_used = model or OPENAI_MODEL
+    active_model_used = active_decision.model
 
     with _obs_context(
         lf,
         as_type="agent",
         name=f"subagent:{role}:{ticker}",
-        input={"question": question, "ticker": ticker, "role": role},
+        input={
+            "question": question,
+            "ticker": ticker,
+            "role": role,
+            "tier": active_decision.tier,
+            "initial_model": active_decision.model,
+            "escalated": active_decision.escalated,
+        },
     ) as agent_span:
         for _step in range(5):
             try:
@@ -261,7 +287,7 @@ def _run_sub_agent(
                     messages=messages,
                     use_tools=True,
                     provider=provider,
-                    model=model,
+                    model=active_decision.model,
                     tools_override=tools_subset,
                     obs_name=f"subagent_{role}_{ticker}_llm",
                 )
@@ -357,12 +383,60 @@ def _run_sub_agent(
                         )
                 else:
                     content = msg.get("content") or "{}"
-                    parsed = _extract_json(content)
+                    try:
+                        parsed = _extract_json(content)
+                    except json.JSONDecodeError:
+                        if self_corrections < 1:
+                            self_corrections += 1
+                            next_dec = escalate_on_guard_failure(
+                                active_decision, explicit_model=model
+                            )
+                            if next_dec.model != active_decision.model:
+                                _emit_event(
+                                    event_cb,
+                                    {
+                                        "type": "tier_escalation",
+                                        "agent": agent_label,
+                                        "role": role,
+                                        "ticker": ticker,
+                                        "from_model": active_decision.model,
+                                        "to_model": next_dec.model,
+                                        "reason": "json_schema_retry_escalation",
+                                    },
+                                )
+                                active_decision = next_dec
+                            messages.append({"role": "assistant", "content": content})
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": "Your output was not valid JSON. Output ONLY a strictly valid JSON object matching the schema.",
+                                }
+                            )
+                            continue
+                        raise
+
                     _valid_cits, invalid_cits = check_citations(
                         parsed, tool_results_history
                     )
                     if invalid_cits and self_corrections < 1:
                         self_corrections += 1
+                        next_dec = escalate_on_guard_failure(
+                            active_decision, explicit_model=model
+                        )
+                        if next_dec.model != active_decision.model:
+                            _emit_event(
+                                event_cb,
+                                {
+                                    "type": "tier_escalation",
+                                    "agent": agent_label,
+                                    "role": role,
+                                    "ticker": ticker,
+                                    "from_model": active_decision.model,
+                                    "to_model": next_dec.model,
+                                    "reason": next_dec.reason,
+                                },
+                            )
+                            active_decision = next_dec
                         messages.append({"role": "assistant", "content": content})
                         messages.append(
                             {
@@ -383,6 +457,9 @@ def _run_sub_agent(
                             "agent": agent_label,
                             "role": role,
                             "ticker": ticker,
+                            "model": active_model_used,
+                            "tier": active_decision.tier,
+                            "escalated": active_decision.escalated,
                             "citations_count": len(verified.get("citations", [])),
                             "self_corrections": self_corrections,
                         },
@@ -402,6 +479,9 @@ def _run_sub_agent(
                         "self_corrections": self_corrections,
                         "cost_usd": round(sub_cost_usd, 6),
                         "model": active_model_used,
+                        "tier": active_decision.tier,
+                        "escalated": active_decision.escalated,
+                        "escalation_reason": active_decision.reason,
                     }
                     if agent_span is not None:
                         try:
@@ -410,6 +490,9 @@ def _run_sub_agent(
                                     "answer": out_payload["answer"],
                                     "citations": out_payload["citations"],
                                     "cost_usd": out_payload["cost_usd"],
+                                    "model": out_payload["model"],
+                                    "tier": out_payload["tier"],
+                                    "escalated": out_payload["escalated"],
                                 }
                             )
                         except Exception:
@@ -429,6 +512,9 @@ def _run_sub_agent(
                     "self_corrections": self_corrections,
                     "cost_usd": round(sub_cost_usd, 6),
                     "model": active_model_used,
+                    "tier": active_decision.tier,
+                    "escalated": active_decision.escalated,
+                    "escalation_reason": active_decision.reason,
                 }
 
     return {
@@ -444,6 +530,9 @@ def _run_sub_agent(
         "self_corrections": self_corrections,
         "cost_usd": round(sub_cost_usd, 6),
         "model": active_model_used,
+        "tier": active_decision.tier,
+        "escalated": active_decision.escalated,
+        "escalation_reason": active_decision.reason,
     }
 
 
@@ -466,6 +555,23 @@ def run_multi_agent_query(
     start_time = time.time()
     target_tickers = detect_tickers(question, ticker, tickers)
     roles = classify_needed_specialists(question)
+    supervisor_decision = resolve_supervisor_tier(explicit_model=model)
+
+    tasks: list[tuple[str, str]] = [
+        (r, t) for t in target_tickers for r in roles
+    ]
+    is_sole_specialist = len(tasks) == 1
+    task_decisions: dict[tuple[str, str], TierDecision] = {
+        (r, t): resolve_subagent_tier(
+            question=question,
+            role=r,
+            tickers=target_tickers,
+            explicit_model=model,
+            sole_specialist=is_sole_specialist,
+        )
+        for r, t in tasks
+    }
+
     _emit_event(
         event_cb,
         {
@@ -473,15 +579,18 @@ def run_multi_agent_query(
             "mode": "multi_agent",
             "tickers": target_tickers,
             "specialists": roles,
+            "supervisor_model": supervisor_decision.model,
+            "subagent_default_model": model or TIER2_MODEL,
+            "escalated_tasks": [
+                f"{r.upper()}_{t}"
+                for (r, t), dec in task_decisions.items()
+                if dec.escalated
+            ],
         },
     )
 
     lf = _get_langfuse()
     trace_url: str | None = None
-
-    tasks: list[tuple[str, str]] = [
-        (r, t) for t in target_tickers for r in roles
-    ]
 
     with _obs_context(
         lf,
@@ -491,12 +600,19 @@ def run_multi_agent_query(
             "question": question,
             "target_tickers": target_tickers,
             "specialist_roles": roles,
+            "tier1_supervisor_model": supervisor_decision.model,
+            "tier2_subagent_model": model or TIER2_MODEL,
         },
     ) as root_span, propagate_trace_attributes(
         lf,
         session_id=session_id,
         user_id=user_id,
-        tags=["company-scope", "multi-agent"] + [f"ticker:{t}" for t in target_tickers],
+        tags=[
+            "company-scope",
+            "multi-agent",
+            f"supervisor:{supervisor_decision.model}",
+        ]
+        + [f"ticker:{t}" for t in target_tickers],
         trace_name="companyscope_multi_agent_supervisor",
     ):
         if lf is not None:
@@ -517,6 +633,7 @@ def run_multi_agent_query(
                     question=question,
                     provider=provider,
                     model=model,
+                    tier_decision=task_decisions[(r, t)],
                     event_cb=event_cb,
                 ): (r, t)
                 for r, t in tasks
@@ -562,11 +679,32 @@ def run_multi_agent_query(
                         "citations_count": len(single["citations"]),
                         "self_corrections": single["self_corrections"],
                         "cost_usd": single.get("cost_usd", 0.0),
+                        "model": single.get("model"),
+                        "tier": single.get("tier", "tier1"),
+                        "escalated": bool(single.get("escalated", False)),
+                        "escalation_reason": single.get("escalation_reason", ""),
                     }
                 ],
                 "self_corrections": total_self_corrections,
                 "cost_usd": round(total_cost_usd, 6),
                 "model": single.get("model"),
+                "tier": single.get("tier", "tier1"),
+                "escalated": bool(single.get("escalated", False)),
+                "escalation_reason": single.get("escalation_reason", ""),
+                "tier_breakdown": {
+                    "supervisor_model": single.get("model") or supervisor_decision.model,
+                    "tier1_model": TIER1_MODEL,
+                    "tier2_model": TIER2_MODEL,
+                    "tier1_agents": (
+                        [single["agent"]] if single.get("tier") == "tier1" else []
+                    ),
+                    "tier2_agents": (
+                        [single["agent"]] if single.get("tier") == "tier2" else []
+                    ),
+                    "escalated_agents": (
+                        [single["agent"]] if single.get("escalated") else []
+                    ),
+                },
                 "latency_ms": round((time.time() - start_time) * 1000),
             }
             if trace_url:
@@ -578,6 +716,7 @@ def run_multi_agent_query(
                             "answer": final_single["answer"],
                             "citations": final_single["citations"],
                             "cost_usd": final_single["cost_usd"],
+                            "model": final_single["model"],
                         }
                     )
                 except Exception:
@@ -594,6 +733,7 @@ def run_multi_agent_query(
                 "sub_agent": rep["agent"],
                 "ticker": rep["ticker"],
                 "role": rep["role"],
+                "model": rep.get("model"),
                 "verified_answer": rep["answer"],
                 "verified_citations": rep["citations"],
             }
@@ -622,13 +762,15 @@ def run_multi_agent_query(
             }
         )
 
-        active_model_used = model or OPENAI_MODEL
+        active_model_used = supervisor_decision.model
         _emit_event(
             event_cb,
             {
                 "type": "synthesizing",
                 "reports_count": len(sub_reports),
                 "tickers": target_tickers,
+                "model": supervisor_decision.model,
+                "tier": supervisor_decision.tier,
             },
         )
         try:
@@ -636,8 +778,8 @@ def run_multi_agent_query(
                 messages=synth_messages,
                 use_tools=False,
                 provider=provider,
-                model=model,
-                obs_name="multi_agent_synthesizer",
+                model=supervisor_decision.model,
+                obs_name="multi_agent_tier1_synthesizer",
             )
             total_cost_usd += float(
                 (synth_msg.get("_cost_details") or {}).get("total", 0.0)
@@ -674,8 +816,8 @@ def run_multi_agent_query(
                     messages=synth_messages,
                     use_tools=False,
                     provider=provider,
-                    model=model,
-                    obs_name="multi_agent_synthesizer_self_correction",
+                    model=supervisor_decision.model,
+                    obs_name="multi_agent_tier1_synthesizer_self_correction",
                 )
                 total_cost_usd += float(
                     (retry_msg.get("_cost_details") or {}).get("total", 0.0)
@@ -695,6 +837,16 @@ def run_multi_agent_query(
                 "needs_clarification": "",
             }
 
+        tier1_agents = ["SUPERVISOR_SYNTH"] + [
+            rep["agent"] for rep in sub_reports if rep.get("tier") == "tier1"
+        ]
+        tier2_agents = [
+            rep["agent"] for rep in sub_reports if rep.get("tier") == "tier2"
+        ]
+        escalated_agents = [
+            rep["agent"] for rep in sub_reports if rep.get("escalated")
+        ]
+
         verified_final["used_tools"] = combined_used_tools
         verified_final["tool_trace"] = combined_tool_trace
         verified_final["sub_agent_reports"] = [
@@ -706,12 +858,26 @@ def run_multi_agent_query(
                 "citations_count": len(rep.get("citations", [])),
                 "self_corrections": rep.get("self_corrections", 0),
                 "cost_usd": rep.get("cost_usd", 0.0),
+                "model": rep.get("model"),
+                "tier": rep.get("tier", "tier2"),
+                "escalated": bool(rep.get("escalated", False)),
+                "escalation_reason": rep.get("escalation_reason", ""),
             }
             for rep in sub_reports
         ]
         verified_final["self_corrections"] = total_self_corrections
         verified_final["cost_usd"] = round(total_cost_usd, 6)
         verified_final["model"] = active_model_used
+        verified_final["tier"] = supervisor_decision.tier
+        verified_final["escalated"] = bool(escalated_agents)
+        verified_final["tier_breakdown"] = {
+            "supervisor_model": active_model_used,
+            "tier1_model": TIER1_MODEL,
+            "tier2_model": TIER2_MODEL,
+            "tier1_agents": tier1_agents,
+            "tier2_agents": tier2_agents,
+            "escalated_agents": escalated_agents,
+        }
         verified_final["latency_ms"] = round((time.time() - start_time) * 1000)
         if trace_url:
             verified_final["trace_url"] = trace_url

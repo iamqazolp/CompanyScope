@@ -27,8 +27,9 @@ from src.config import (
     LANGFUSE_PUBLIC_KEY,
     LANGFUSE_SECRET_KEY,
     LLM_PROVIDER,
-    OPENAI_MODEL,
     RATE_LIMIT_PER_MINUTE,
+    TIER1_MODEL,
+    TIER2_MODEL,
     get_langfuse,
     obs_context,
     propagate_trace_attributes,
@@ -45,7 +46,11 @@ from src.db import (
 from src.embed import build_index, get_index_stats, is_cloud_vector_enabled
 from src.embeddings import get_active_embedding_model_name
 from src.ingest import ingest_company
-from src.multi_agent import detect_tickers, run_multi_agent_query
+from src.multi_agent import (
+    classify_needed_specialists,
+    detect_tickers,
+    run_multi_agent_query,
+)
 from src.showcase import get_showcase_by_slug, list_showcase_summaries
 from src.tools import get_company_financial_summary
 
@@ -179,7 +184,8 @@ def _execute_query_dispatch(
         detected = detect_tickers(
             payload.question, target_ticker, explicit_tickers or None
         )
-        if len(detected) > 1 or explicit_tickers:
+        needed_roles = classify_needed_specialists(payload.question)
+        if len(detected) > 1 or explicit_tickers or len(needed_roles) > 1:
             res = run_multi_agent_query(
                 question=payload.question,
                 ticker=target_ticker,
@@ -216,7 +222,9 @@ def health_check() -> dict[str, Any]:
         "status": "ok",
         "version": APP_VERSION,
         "provider": LLM_PROVIDER,
-        "model": OPENAI_MODEL,
+        "model": TIER1_MODEL,
+        "tier1_model": TIER1_MODEL,
+        "tier2_model": TIER2_MODEL,
         "embedding_model": (
             get_active_embedding_model_name() if cloud_vec else EMBEDDING_MODEL
         ),

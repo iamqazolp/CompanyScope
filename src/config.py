@@ -51,10 +51,15 @@ def _resolve_path(name: str, default: Path) -> Path:
     return path
 
 
-# LLM Provider Configuration
+# LLM Provider & Multi-Tier Agent Configuration
 OPENAI_URL = os.getenv("OPENAI_URL", "https://api.shopaikey.com").rstrip("/")
 OPENAI_KEY = os.getenv("OPENAI_KEY", os.getenv("OPENAI_API_KEY", ""))
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-6-luna")
+
+# Tier 1: Frontier Lead Supervisor, Synthesizer & Demanding-Task Escalation
+TIER1_MODEL = os.getenv("TIER1_MODEL", "gpt-6.1-terra").strip()
+# Tier 2: Fast Specialist Sub-Agent Workhorse & Routine Single-Agent Queries
+TIER2_MODEL = os.getenv("TIER2_MODEL", OPENAI_MODEL).strip()
 
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()
 LLM_TIMEOUT = _get_float("LLM_TIMEOUT", 90.0)
@@ -128,7 +133,7 @@ LANGFUSE_HOST = os.getenv(
     "LANGFUSE_HOST", os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
 )
 
-# GPT-6-Luna Pricing (USD per 1M tokens)
+# Tier 2 (GPT-6-Luna) Pricing (USD per 1M tokens)
 GPT6_LUNA_INPUT_PRICE_PER_1M = _get_float("GPT6_LUNA_INPUT_PRICE_PER_1M", 0.10)
 GPT6_LUNA_CACHED_INPUT_PRICE_PER_1M = _get_float(
     "GPT6_LUNA_CACHED_INPUT_PRICE_PER_1M", 0.01
@@ -137,6 +142,16 @@ GPT6_LUNA_CACHE_WRITE_PRICE_PER_1M = _get_float(
     "GPT6_LUNA_CACHE_WRITE_PRICE_PER_1M", 0.125
 )
 GPT6_LUNA_OUTPUT_PRICE_PER_1M = _get_float("GPT6_LUNA_OUTPUT_PRICE_PER_1M", 0.50)
+
+# Tier 1 (GPT-6.1-Terra) Pricing (USD per 1M tokens)
+GPT6_1_TERRA_INPUT_PRICE_PER_1M = _get_float("GPT6_1_TERRA_INPUT_PRICE_PER_1M", 2.00)
+GPT6_1_TERRA_CACHED_INPUT_PRICE_PER_1M = _get_float(
+    "GPT6_1_TERRA_CACHED_INPUT_PRICE_PER_1M", 0.20
+)
+GPT6_1_TERRA_CACHE_WRITE_PRICE_PER_1M = _get_float(
+    "GPT6_1_TERRA_CACHE_WRITE_PRICE_PER_1M", 2.50
+)
+GPT6_1_TERRA_OUTPUT_PRICE_PER_1M = _get_float("GPT6_1_TERRA_OUTPUT_PRICE_PER_1M", 8.00)
 
 LANGFUSE_TRACING_ENVIRONMENT = os.getenv(
     "LANGFUSE_TRACING_ENVIRONMENT",
