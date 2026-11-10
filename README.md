@@ -10,9 +10,11 @@ CompanyScope is an agentic financial research platform that synthesizes primary 
 
 ## Key Capabilities
 
-- **Native Multi-Agent Supervisor (`src/multi_agent.py`)**
-  - Routes queries dynamically via `classify_needed_specialists` across three concurrent specialists—**Quantitative** (`get_financial_data` + AST `calculator`), **Qualitative** (`search_filings` + `get_earnings_transcripts`), and **Market Sentiment** (`get_market_sentiment`)—via `ThreadPoolExecutor`.
-  - Supports **Multi-Company Peer Comparison** across up to 4 tickers in parallel (`/compare` and `/ask`).
+- **Multi-Tier Agent Hierarchy (`src/multi_agent.py`, `src/tier_router.py`)**
+  - **Tier-1 Frontier Supervisor & Synthesizer (`gpt-6.1-terra`):** Orchestrates cross-company planning and executive synthesis across all verified specialist findings.
+  - **Tier-2 Fast Specialist Sub-Agents (`gpt-6-luna`):** Executes concurrent **Quantitative** (`get_financial_data` + AST `calculator`), **Qualitative** (`search_filings` + `get_earnings_transcripts`), and **Market Sentiment** (`get_market_sentiment`) tool loops via `ThreadPoolExecutor` at ~90% lower token cost.
+  - **Dynamic Complexity & Guardrail Escalation:** Proactively upgrades demanding sub-tasks (multi-year CAGR/ROIC derivations, forensic accounting audits, cross-source contradiction synthesis, or 3+ peer cohorts) and Citation Guard self-correction retries from `gpt-6-luna` directly to `gpt-6.1-terra`.
+  - Supports **Multi-Company Peer Comparison** across up to 4 tickers in parallel (`/compare`, `/ask`, and `/api/ask/stream` SSE).
 - **Hybrid RAG + RAPTOR-Lite Filing Retrieval (`src/ingest.py`, `src/embed.py`, `src/tools.py`)**
   - Extracts narrative sections across `10-K` (`Item 1`, `1A`, `7`, `7A`), `10-Q` (`Item 1A`, `2`), and `8-K` (`Item 2.02` + Exhibit `99.1` earnings releases, `1.01`, `5.02`, `7.01`, `8.01`) while preserving compact financial/segment HTML tables as inline Markdown.
   - Builds collision-free accession chunk IDs across granular leaf chunks (`chunk_level="leaf"`) and hierarchical **RAPTOR-lite verbatim section summaries** (`chunk_level="summary"`).
@@ -39,27 +41,27 @@ flowchart TD
     User["Analyst Query (Single Ticker or Peer Comparison)"] --> API["FastAPI Backend (/ask, /compare)"]
     API --> Mode{"Orchestration Mode"}
 
-    Mode -- "mode = multi_agent | auto" --> Sup["Supervisor Router (classify_needed_specialists)"]
-    Mode -- "mode = single" --> Single["Unified ReAct Agent (src/agent.py)"]
+    Mode -- "mode = multi_agent | auto" --> Sup["Tier-1 Supervisor Router (gpt-6.1-terra + src/tier_router.py)"]
+    Mode -- "mode = single" --> Single["Tiered Single Agent (gpt-6-luna routine / gpt-6.1-terra demanding)"]
 
-    Sup --> Pool["Concurrent ThreadPoolExecutor (Per Ticker & Specialist)"]
+    Sup --> Pool["Concurrent ThreadPoolExecutor (Tier-2 gpt-6-luna default / Tier-1 gpt-6.1-terra escalation)"]
     Pool --> Quant["Quant Specialist (get_financial_data + calculator)"]
     Pool --> Qual["Qual Specialist (search_filings + get_earnings_transcripts)"]
     Pool --> Sent["Sentiment Specialist (get_market_sentiment)"]
 
     Quant --> XBRL["SEC EDGAR XBRL Statements & Segments"]
     Quant --> Calc["AST Safe Calculator"]
-    Qual --> RRF["Hybrid RAG (ChromaDB Dense + BM25 RRF + RAPTOR-lite)"]
+    Qual --> RRF["Hybrid RAG (Neon pgvector + tsvector RRF + RAPTOR-lite)"]
     Qual --> Earn["FMP / Finnhub / SEC 8-K Ex. 99.1 Earnings"]
     Sent --> Mkt["Reddit (r/stocks, r/investing, r/wallstreetbets) + Yahoo Finance"]
 
     Single --> XBRL & Calc & RRF & Earn & Mkt
 
-    Quant & Qual & Sent --> Synth["Lead Financial Synthesizer"]
+    Quant & Qual & Sent --> Synth["Tier-1 Lead Financial Synthesizer (gpt-6.1-terra)"]
     Single --> Guard["Citation Guard (src/guard.py)"]
     Synth --> Guard
 
-    Guard -- "Failed Citations (Self-Correction)" --> Synth
+    Guard -- "Failed Citations (Escalate Retry to gpt-6.1-terra)" --> Synth
     Guard -- "100% Verified" --> Output["Verified Answer + Sub-Agent Reports + Langfuse v4 Trace"]
 ```
 
@@ -76,8 +78,9 @@ CompanyScope/
 │   └── index.py                # Vercel Fluid Compute Python ASGI entrypoint (maxDuration: 300s)
 ├── src/
 │   ├── app.py                  # FastAPI server (/api/ask/stream SSE, /quota, /showcase, /reports, /ask)
-│   ├── agent.py                # Single-agent tool-calling loop with SSE events & Citation Guard retry
-│   ├── multi_agent.py          # Multi-Agent Supervisor (Quant, Qual & Sentiment + peer comparison)
+│   ├── agent.py                # Tiered single-agent loop with SSE events & Terra guard escalation
+│   ├── multi_agent.py          # Multi-Agent Supervisor (Tier-1 Terra Synth + Tier-2 Luna Sub-Agents)
+│   ├── tier_router.py          # Complexity classifier & dynamic Luna -> Terra escalation router
 │   ├── embeddings.py           # Cloud Gemini Embedding 2 (768-dim MRL) REST client
 │   ├── db.py                   # Neon Postgres (pgvector + tsvector RRF, 5/day guest quota, XBRL cache)
 │   ├── showcase.py             # Pre-verified zero-quota showcase equity research reports
@@ -119,10 +122,11 @@ npm install
 ### 2. Configure Environment Variables (`.env`)
 Create a `.env` file in the repository root:
 ```env
-# Primary OpenAI-compatible LLM endpoint
+# Multi-Tier OpenAI-compatible LLM endpoint
 OPENAI_URL=https://api.shopaikey.com
 OPENAI_KEY=your_openai_api_key
-OPENAI_MODEL=gpt-6-luna
+TIER1_MODEL=gpt-6.1-terra
+TIER2_MODEL=gpt-6-luna
 
 # Cloud Embeddings (Google AI Studio — gemini-embedding-2, 768-dim MRL)
 GOOGLE_AI_STUDIO_KEY=your_google_ai_studio_key

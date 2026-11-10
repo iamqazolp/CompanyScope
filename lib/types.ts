@@ -24,6 +24,19 @@ export interface SubAgentReport {
   citations_count: number;
   self_corrections: number;
   cost_usd?: number;
+  model?: string;
+  tier?: "tier1" | "tier2";
+  escalated?: boolean;
+  escalation_reason?: string;
+}
+
+export interface TierBreakdown {
+  supervisor_model: string;
+  tier1_model: string;
+  tier2_model: string;
+  tier1_agents: string[];
+  tier2_agents: string[];
+  escalated_agents: string[];
 }
 
 export interface ToolTraceItem {
@@ -50,6 +63,10 @@ export interface QueryResult {
   self_corrections?: number;
   cost_usd?: number;
   model?: string;
+  tier?: "tier1" | "tier2";
+  escalated?: boolean;
+  escalation_reason?: string;
+  tier_breakdown?: TierBreakdown;
   latency_ms?: number;
   trace_url?: string;
   report_slug?: string;
@@ -97,6 +114,7 @@ export interface StreamStep {
   type:
     | "plan"
     | "specialist_start"
+    | "tier_escalation"
     | "tool_call"
     | "specialist_done"
     | "synthesizing"
@@ -105,4 +123,6 @@ export interface StreamStep {
   detail?: string;
   role?: string;
   ticker?: string;
+  model?: string;
+  escalated?: boolean;
 }

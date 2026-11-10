@@ -48,6 +48,13 @@ const QUICK_PROMPTS = [
     q: "Compare revenue scale, profitability, and primary AI and cloud risk disclosures between Apple and Microsoft.",
   },
   {
+    label: "⚡ Multi-Year CAGR & Forensic Escalation",
+    ticker: "AAPL",
+    peers: "",
+    mode: "multi_agent",
+    q: "Calculate Apple's 3-year revenue CAGR from 2022 to 2025, analyze gross margin expansion, and reconcile any contradictions between 8-K commentary and 10-K antitrust/tariff risks.",
+  },
+  {
     label: "8-K Earnings & Street Pulse",
     ticker: "AAPL",
     peers: "",
@@ -83,11 +90,13 @@ export function ResearchTerminal({ initialReport = null }: Props) {
     reset_at: "",
   });
   const [engineInfo, setEngineInfo] = useState<{
-    model: string;
+    tier1Model: string;
+    tier2Model: string;
     embedding: string;
     backend: string;
   }>({
-    model: "gpt-6-luna",
+    tier1Model: "gpt-6.1-terra",
+    tier2Model: "gpt-6-luna",
     embedding: "gemini-embedding-2",
     backend: "pgvector",
   });
@@ -131,7 +140,8 @@ export function ResearchTerminal({ initialReport = null }: Props) {
         if (!cancelled && hRes.ok) {
           const h = await hRes.json();
           setEngineInfo({
-            model: h.model || "gpt-6-luna",
+            tier1Model: h.tier1_model || h.model || "gpt-6.1-terra",
+            tier2Model: h.tier2_model || "gpt-6-luna",
             embedding: h.embedding_model || "gemini-embedding-2",
             backend: h.vector_backend || "pgvector",
           });
@@ -300,16 +310,33 @@ export function ResearchTerminal({ initialReport = null }: Props) {
               if (ev.type === "quota" && ev.quota) {
                 setQuota(ev.quota);
               } else if (ev.type === "plan") {
+                const planLabel =
+                  ev.mode === "single"
+                    ? `Single-Agent routed to ${ev.model || engineInfo.tier2Model}${
+                        ev.escalated ? " (⚡ Demanding Task Escalation)" : ""
+                      } for ${(ev.tickers || []).join(", ")}`
+                    : `Tier-1 Supervisor (${
+                        ev.supervisor_model || engineInfo.tier1Model
+                      }) dispatched [${(ev.specialists || [])
+                        .join(", ")
+                        .toUpperCase()}] across ${(ev.tickers || []).join(", ")}`;
                 setSteps((prev) => [
                   ...prev,
                   {
                     id: `plan-${Date.now()}`,
                     timestamp: Date.now(),
                     type: "plan",
-                    label: `Supervisor routed to [${(ev.specialists || []).join(", ").toUpperCase()}] for ${(ev.tickers || []).join(", ")}`,
+                    model: ev.supervisor_model || ev.model,
+                    escalated: Boolean(ev.escalated),
+                    label: planLabel,
                   },
                 ]);
               } else if (ev.type === "specialist_start") {
+                const tierTag = ev.escalated
+                  ? `⚡ Tier-1 Escalated (${ev.model})`
+                  : `${ev.tier === "tier1" ? "Tier-1" : "Tier-2"} (${
+                      ev.model || engineInfo.tier2Model
+                    })`;
                 setSteps((prev) => [
                   ...prev,
                   {
@@ -318,7 +345,25 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                     type: "specialist_start",
                     role: ev.role,
                     ticker: ev.ticker,
-                    label: `${ev.agent} specialist started`,
+                    model: ev.model,
+                    escalated: Boolean(ev.escalated),
+                    label: `${ev.agent} specialist started on ${tierTag}`,
+                  },
+                ]);
+              } else if (ev.type === "tier_escalation") {
+                setSteps((prev) => [
+                  ...prev,
+                  {
+                    id: `esc-${ev.agent}-${Date.now()}`,
+                    timestamp: Date.now(),
+                    type: "tier_escalation",
+                    role: ev.role,
+                    ticker: ev.ticker,
+                    model: ev.to_model,
+                    escalated: true,
+                    label: `⚡ ${ev.agent} escalated ${ev.from_model} → ${ev.to_model} (${String(
+                      ev.reason || "demanding_retry"
+                    ).replace(/_/g, " ")})`,
                   },
                 ]);
               } else if (ev.type === "tool_call") {
@@ -357,7 +402,10 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                     id: `synth-${Date.now()}`,
                     timestamp: Date.now(),
                     type: "synthesizing",
-                    label: `Synthesizing ${ev.reports_count} specialist reports into executive brief...`,
+                    model: ev.model,
+                    label: `Tier-1 Lead Synthesizer (${
+                      ev.model || engineInfo.tier1Model
+                    }) merging ${ev.reports_count} verified specialist reports...`,
                   },
                 ]);
               } else if (ev.type === "guard_check") {
@@ -437,7 +485,8 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                   </span>
                 </div>
                 <p className="hidden md:block text-[10.5px] text-slate-500 font-mono">
-                  10-K/10-Q/8-K Hybrid RAG · XBRL · {engineInfo.embedding} ·{" "}
+                  Tier 1: {engineInfo.tier1Model} · Sub-Agents:{" "}
+                  {engineInfo.tier2Model} · {engineInfo.embedding} ·{" "}
                   {engineInfo.backend}
                 </p>
               </div>
@@ -703,9 +752,19 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                   {steps.map((st) => (
                     <div
                       key={st.id}
-                      className="flex items-center gap-2 font-mono text-[11px] text-slate-400"
+                      className={`flex items-center gap-2 font-mono text-[11px] ${
+                        st.escalated || st.type === "tier_escalation"
+                          ? "text-amber-300"
+                          : "text-slate-400"
+                      }`}
                     >
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400/80 shrink-0" />
+                      <span
+                        className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+                          st.escalated || st.type === "tier_escalation"
+                            ? "bg-amber-400"
+                            : "bg-emerald-400/80"
+                        }`}
+                      />
                       <span className="truncate">{st.label}</span>
                     </div>
                   ))}
@@ -807,11 +866,37 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                           key={sub.agent}
                           className="rounded-lg border border-slate-800 bg-[#090e19] p-3.5 space-y-2"
                         >
-                          <div className="flex items-center justify-between">
-                            <span className="inline-flex items-center gap-1.5 font-mono text-xs font-semibold text-blue-300">
-                              <Bot className="h-3.5 w-3.5" />
-                              {sub.agent}
-                            </span>
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="inline-flex items-center gap-1.5 font-mono text-xs font-semibold text-blue-300">
+                                <Bot className="h-3.5 w-3.5" />
+                                {sub.agent}
+                              </span>
+                              {sub.model && (
+                                <span
+                                  title={
+                                    sub.escalation_reason
+                                      ? sub.escalation_reason.replace(/_/g, " ")
+                                      : undefined
+                                  }
+                                  className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] ${
+                                    sub.escalated
+                                      ? "border-amber-500/40 bg-amber-500/15 text-amber-200"
+                                      : sub.tier === "tier1"
+                                      ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-200"
+                                      : "border-slate-700 bg-slate-800/70 text-slate-300"
+                                  }`}
+                                >
+                                  {sub.escalated
+                                    ? `⚡ Tier 1 Escalated · ${sub.model}`
+                                    : `${
+                                        sub.tier === "tier1"
+                                          ? "Tier 1"
+                                          : "Tier 2"
+                                      } · ${sub.model}`}
+                                </span>
+                              )}
+                            </div>
                             <span className="font-mono text-[10.5px] text-slate-500">
                               {sub.citations_count} verified citations ·{" "}
                               {sub.self_corrections} retries
@@ -869,11 +954,25 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                   <div className="pt-3 border-t border-slate-800/60 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-slate-500">
                     <div className="flex flex-wrap items-center gap-3">
                       {result.model && (
-                        <span className="inline-flex items-center gap-1">
-                          <Cpu className="h-3 w-3 text-slate-400" />
-                          {result.model}
+                        <span className="inline-flex items-center gap-1 text-emerald-300/90">
+                          <Cpu className="h-3 w-3 text-emerald-400" />
+                          <span>
+                            {result.tier === "tier2" ? "Tier 2:" : "Tier 1:"}{" "}
+                            {result.model}
+                            {result.escalated ? " ⚡" : ""}
+                          </span>
                         </span>
                       )}
+                      {result.tier_breakdown &&
+                        result.tier_breakdown.tier2_agents.length > 0 && (
+                          <span className="text-slate-400">
+                            Sub-Agents: {result.tier_breakdown.tier2_agents.length}×{" "}
+                            {result.tier_breakdown.tier2_model}
+                            {result.tier_breakdown.escalated_agents.length > 0
+                              ? ` · ${result.tier_breakdown.escalated_agents.length}× ${result.tier_breakdown.tier1_model} ⚡`
+                              : ""}
+                          </span>
+                        )}
                       {typeof result.latency_ms === "number" && (
                         <span className="inline-flex items-center gap-1 tabular-nums">
                           <Clock className="h-3 w-3 text-slate-400" />
