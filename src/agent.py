@@ -30,6 +30,7 @@ from src.config import (
     propagate_trace_attributes,
 )
 from src.guard import check_citations, verify_citations
+from src.market import get_insider_and_events, get_live_market_data
 from src.tier_router import escalate_on_guard_failure, resolve_single_agent_tier
 from src.tools import (
     calculator,
@@ -299,7 +300,7 @@ TOOLS_LIST: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_market_sentiment",
-            "description": "Fetches public market sentiment, Reddit discussions (r/stocks, r/investing, r/wallstreetbets), and recent Yahoo Finance news headlines for a given company ticker.",
+            "description": "Fetches fresh 24h-7d financial news (Google News, Yahoo Finance, Finnhub) and recent Reddit investor discussions (r/stocks, r/investing, r/wallstreetbets, r/SecurityAnalysis) for a given company ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -310,6 +311,40 @@ TOOLS_LIST: list[dict[str, Any]] = [
                     "query": {
                         "type": "string",
                         "description": "Optional topic or keyword filter (e.g., 'AI iPhone sales', 'valuation')",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_live_market_data",
+            "description": "Fetches live stock price, 1-day % change, Market Cap, Enterprise Value, Trailing & Forward P/E, EV/EBITDA, 52-week high/low, and Wall Street analyst consensus target price.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "The stock ticker symbol, e.g., AAPL",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_insider_and_events",
+            "description": "Fetches live SEC Form 4 executive/director insider stock buys and sales alongside recent Form 8-K material corporate event filings.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "The stock ticker symbol, e.g., AAPL",
                     },
                 },
                 "required": ["ticker"],
@@ -340,6 +375,8 @@ TOOL_FUNCTIONS: dict[str, Any] = {
     "search_filings": search_filings,
     "get_earnings_transcripts": get_earnings_transcripts,
     "get_market_sentiment": get_market_sentiment,
+    "get_live_market_data": get_live_market_data,
+    "get_insider_and_events": get_insider_and_events,
     "calculator": calculator,
 }
 

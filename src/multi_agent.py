@@ -32,39 +32,46 @@ from src.tier_router import (
 QUANT_TOOLS = [
     t
     for t in TOOLS_LIST
-    if t["function"]["name"] in ("get_financial_data", "calculator")
+    if t["function"]["name"]
+    in ("get_financial_data", "get_live_market_data", "calculator")
 ]
 QUAL_TOOLS = [
     t
     for t in TOOLS_LIST
-    if t["function"]["name"] in ("search_filings", "get_earnings_transcripts")
+    if t["function"]["name"]
+    in ("search_filings", "get_earnings_transcripts", "get_insider_and_events")
 ]
 SENTIMENT_TOOLS = [
-    t for t in TOOLS_LIST if t["function"]["name"] in ("get_market_sentiment",)
+    t
+    for t in TOOLS_LIST
+    if t["function"]["name"] in ("get_market_sentiment", "get_insider_and_events")
 ]
 
-QUANT_SYSTEM_PROMPT = """You are the Quantitative XBRL Financial Sub-Agent for CompanyScope.
-Your sole responsibility is to fetch authoritative numeric financial metrics from SEC 10-K filings using `get_financial_data` and perform exact calculations using `calculator`.
+QUANT_SYSTEM_PROMPT = """You are the Quantitative XBRL & Live Valuation Sub-Agent for CompanyScope.
+Your responsibility is to fetch authoritative numeric financial metrics from SEC 10-K filings using `get_financial_data`, fetch live market quotes and valuation multiples using `get_live_market_data`, and perform exact calculations using `calculator`.
 
 Rules:
-- ALWAYS call `get_financial_data` for every requested metric and year.
-- ALWAYS call `calculator` for any growth rate, difference, margin, or ratio.
+- ALWAYS call `get_financial_data` for historical SEC XBRL metrics and `get_live_market_data` when asked about current stock price, Market Cap, P/E, EV/EBITDA, or analyst targets.
+- ALWAYS call `calculator` for any growth rate, difference, margin, yield, or ratio.
+- For XBRL metrics cite `{"type": "numeric", "ticker": "AAPL", "year": 2025, "concept": "Revenues"}`.
+- For live market metrics cite `{"type": "market", "ticker": "AAPL", "concept": "MarketCap"}` (valid concepts: `SpotPrice`, `MarketCap`, `EnterpriseValue`, `TrailingPE`, `ForwardPE`, `EVToEBITDA`, `FiftyTwoWeekHigh`, `FiftyTwoWeekLow`, `AnalystTargetPrice`).
 - Output ONLY a valid JSON object matching this schema:
 {
-  "answer": "Detailed quantitative findings with exact USD figures and calculated percentages.",
+  "answer": "Detailed quantitative findings with exact USD figures, live multiples, and calculated percentages.",
   "citations": [
-    {"type": "numeric", "ticker": "AAPL", "year": 2023, "concept": "Revenues"}
+    {"type": "numeric", "ticker": "AAPL", "year": 2025, "concept": "FreeCashFlow"},
+    {"type": "market", "ticker": "AAPL", "concept": "MarketCap"}
   ],
   "needs_clarification": ""
 }
 """
 
-QUAL_SYSTEM_PROMPT = """You are the Qualitative SEC Narrative Sub-Agent for CompanyScope.
-Your sole responsibility is to search 10-K and 10-Q narrative sections (Item 1 Business, Item 1A Risk Factors, Item 7 MD&A, Item 7A) using `search_filings` and extract exact verbatim quotes.
+QUAL_SYSTEM_PROMPT = """You are the Qualitative SEC Filings, Earnings & Insider Activity Sub-Agent for CompanyScope.
+Your responsibility is to search 10-K/10-Q/8-K narrative sections using `search_filings`, fetch earnings commentary via `get_earnings_transcripts`, and inspect SEC Form 4 insider trades & live 8-K events via `get_insider_and_events`.
 
 Rules:
-- ALWAYS call `search_filings` for the assigned ticker.
-- Every narrative citation's `"quote"` field MUST be an exact, contiguous verbatim substring copied character-for-character from `chunk_text`.
+- Call `search_filings` (and `get_earnings_transcripts` or `get_insider_and_events` when relevant) for the assigned ticker.
+- Every citation's `"quote"` field MUST be an exact, contiguous verbatim substring copied character-for-character from `chunk_text` (use `"type": "narrative"` for 10-K/10-Q, `"type": "earnings"` for 8-K/transcripts, or `"type": "insider"` for Form 4/live events).
 - Output ONLY a valid JSON object matching this schema:
 {
   "answer": "Detailed qualitative analysis incorporating exact verbatim quotes from the filings.",
@@ -72,9 +79,9 @@ Rules:
     {
       "type": "narrative",
       "ticker": "AAPL",
-      "year": 2024,
+      "year": 2025,
       "section": "Item 1A",
-      "chunk_id": "AAPL_2024_10-K_Item1A_0",
+      "chunk_id": "AAPL_2025_10-K_Item1A_0",
       "quote": "Exact verbatim substring from chunk_text."
     }
   ],
@@ -175,7 +182,9 @@ def classify_needed_specialists(question: str) -> list[str]:
         "revenue", "sales", "net income", "profit", "operating income",
         "asset", "liabilit", "equity", "cash flow", "capex", "capital expenditure",
         "growth", "calculate", "difference", "margin", "ratio", "how much",
-        "compare", "financial", "numbers", "metrics",
+        "compare", "financial", "numbers", "metrics", "stock price", "share price",
+        "market cap", "valuation", "p/e", "forward pe", "ev/ebitda", "multiple",
+        "target price", "52-week", "fcf yield", "undervalued", "overvalued",
     )
     qual_keywords = (
         "risk", "supply chain", "cyber", "strategy", "md&a", "management",
@@ -183,12 +192,13 @@ def classify_needed_specialists(question: str) -> list[str]:
         "item 7", "narrative", "summarize", "summary", "mention", "say about",
         "outlook", "challenge", "litigation", "regulation", "earnings call",
         "transcript", "press release", "ceo", "cfo", "guidance", "commentary",
+        "insider", "form 4", "8-k", "director", "executive",
     )
 
     sentiment_keywords = (
         "sentiment", "reddit", "social media", "wallstreetbets", "wsb",
         "news", "headline", "retail investor", "chatter", "buzz", "public opinion",
-        "what are people saying", "what do investors think",
+        "what are people saying", "what do investors think", "catalyst", "latest news",
     )
 
     needs_quant = any(kw in q_lower for kw in quant_keywords)
@@ -321,9 +331,11 @@ def _run_sub_agent(
 
                         if fn_name in (
                             "get_financial_data",
+                            "get_live_market_data",
                             "search_filings",
                             "get_earnings_transcripts",
                             "get_market_sentiment",
+                            "get_insider_and_events",
                         ) and not fn_args.get("ticker"):
                             fn_args["ticker"] = ticker
 

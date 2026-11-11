@@ -46,6 +46,11 @@ from src.db import (
 from src.embed import build_index, get_index_stats, is_cloud_vector_enabled
 from src.embeddings import get_active_embedding_model_name
 from src.ingest import ingest_company
+from src.market import (
+    get_live_market_data,
+    get_market_pulse_and_recap,
+    get_ohlcv_chart_data,
+)
 from src.multi_agent import (
     classify_needed_specialists,
     detect_tickers,
@@ -374,6 +379,33 @@ def get_ticker_financials(ticker: str) -> dict[str, Any]:
         return {"ticker": clean_ticker, "financials": rows}
     except Exception as e:
         return {"error": f"Failed to fetch financial summary: {str(e)}"}
+
+
+@router.get("/market/recap")
+def fetch_daily_market_recap(force: bool = False) -> dict[str, Any]:
+    """Zero-quota endpoint returning live cross-asset benchmarks + 30m cached AI Market News Recap."""
+    try:
+        return get_market_pulse_and_recap(force_refresh=force)
+    except Exception as e:
+        return {"error": f"Failed to fetch market recap: {str(e)}"}
+
+
+@router.get("/market/quote/{ticker}")
+def fetch_live_ticker_quote(ticker: str) -> dict[str, Any]:
+    """Zero-quota endpoint returning live spot price, 1D %, Market Cap, P/E, EV/EBITDA, and consensus target."""
+    try:
+        return get_live_market_data(ticker.upper().strip())
+    except Exception as e:
+        return {"error": f"Failed to fetch live quote: {str(e)}"}
+
+
+@router.get("/market/chart/{ticker}")
+def fetch_live_ticker_chart(ticker: str, timeframe: str = "6M") -> dict[str, Any]:
+    """Zero-quota endpoint returning OHLCV candles + volume formatted for TradingView lightweight-charts."""
+    try:
+        return get_ohlcv_chart_data(ticker.upper().strip(), timeframe=timeframe)
+    except Exception as e:
+        return {"error": f"Failed to fetch live OHLCV chart: {str(e)}"}
 
 
 @router.post("/compare")

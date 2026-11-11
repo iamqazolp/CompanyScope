@@ -65,6 +65,11 @@ def _get_sqlite_conn() -> sqlite3.Connection:
                 payload_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS market_cache (
+                cache_key TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                cached_at REAL NOT NULL
+            );
             """
         )
         conn.commit()
@@ -143,6 +148,15 @@ def ensure_pg_schema() -> None:
                     mode TEXT NOT NULL,
                     payload_json JSONB NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS market_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    payload_json JSONB NOT NULL,
+                    cached_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
                 """
             )
@@ -774,3 +788,81 @@ def get_shared_report(slug: str) -> dict[str, Any] | None:
     finally:
         conn.close()
     return None
+
+
+def get_market_cache(cache_key: str, ttl_seconds: int = 300) -> Any | None:
+    """Reads a TTL-cached JSON payload from Neon Postgres or local SQLite."""
+    if is_postgres_enabled():
+        try:
+            ensure_pg_schema()
+            with _get_pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT payload_json
+                        FROM market_cache
+                        WHERE cache_key = %s
+                          AND cached_at >= NOW() - (%s * INTERVAL '1 second');
+                        """,
+                        (cache_key, ttl_seconds),
+                    )
+                    row = cur.fetchone()
+                    if row and row[0] is not None:
+                        val = row[0]
+                        return json.loads(val) if isinstance(val, str) else val
+        except Exception:
+            return None
+        return None
+
+    conn = _get_sqlite_conn()
+    try:
+        row = conn.execute(
+            "SELECT payload_json, cached_at FROM market_cache WHERE cache_key = ?;",
+            (cache_key,),
+        ).fetchone()
+        if row and (time.time() - float(row["cached_at"]) <= ttl_seconds):
+            return json.loads(row["payload_json"])
+    except Exception:
+        return None
+    finally:
+        conn.close()
+    return None
+
+
+def set_market_cache(cache_key: str, payload: Any) -> None:
+    """Persists a JSON payload into market_cache in Neon Postgres or local SQLite."""
+    payload_str = json.dumps(payload)
+    if is_postgres_enabled():
+        try:
+            ensure_pg_schema()
+            with _get_pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO market_cache (cache_key, payload_json, cached_at)
+                        VALUES (%s, %s::jsonb, NOW())
+                        ON CONFLICT (cache_key) DO UPDATE
+                        SET payload_json = EXCLUDED.payload_json, cached_at = NOW();
+                        """,
+                        (cache_key, payload_str),
+                    )
+        except Exception:
+            pass
+        return
+
+    conn = _get_sqlite_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO market_cache (cache_key, payload_json, cached_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT (cache_key) DO UPDATE
+            SET payload_json = excluded.payload_json, cached_at = excluded.cached_at;
+            """,
+            (cache_key, payload_str, time.time()),
+        )
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()

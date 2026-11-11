@@ -26,8 +26,8 @@ _QUANT_DEMANDING_PATTERNS: tuple[tuple[str, str], ...] = (
         "advanced_capital_or_ratio_modeling",
     ),
     (
-        r"\b(margin (expansion|compression|bridge|decomposition)|segment mix|waterfall)\b",
-        "margin_decomposition_analysis",
+        r"\b(margin (expansion|compression|bridge|decomposition)|segment mix|waterfall|fcf yield|justified by)\b",
+        "margin_or_valuation_decomposition",
     ),
 )
 
@@ -37,7 +37,7 @@ _QUAL_DEMANDING_PATTERNS: tuple[tuple[str, str], ...] = (
         "forensic_accounting_disclosure_audit",
     ),
     (
-        r"\b(contradict\w*|reconcil\w*|diverg\w*|discrepanc\w*|red flag\w*|tone shift|forensic)\b",
+        r"\b(contradict\w*|reconcil\w*|diverg\w*|discrepanc\w*|red flag\w*|tone shift|forensic|insider\w*.*guidance)\b",
         "cross_source_contradiction_synthesis",
     ),
     (

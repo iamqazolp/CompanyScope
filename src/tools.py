@@ -1,9 +1,7 @@
 import ast
-import datetime
 import operator
 import re
 from typing import Any
-import xml.etree.ElementTree as ET
 
 from rank_bm25 import BM25Okapi
 import requests
@@ -35,6 +33,7 @@ from src.embed import (
 )
 from src.embeddings import embed_query_cloud, get_active_embedding_model_name
 from src.ingest import ingest_company
+from src.market import fetch_fresh_news_and_sentiment
 
 # Configure EDGAR identity
 set_identity(EDGAR_IDENTITY)
@@ -960,165 +959,11 @@ def get_market_sentiment(
     limit: int = 6,
 ) -> list[dict[str, Any]]:
     """
-    Fetches public market sentiment, retail investor discussions from Reddit
-    (r/stocks, r/investing, r/wallstreetbets), and recent financial news headlines
-    from Yahoo Finance for a given company ticker.
+    Fetches fresh 24h-7d financial news (Google News RSS, Finnhub, Yahoo Finance) and
+    recent investor discussions from Reddit (r/stocks, r/investing, r/wallstreetbets,
+    r/SecurityAnalysis) ranked by BM25 relevance and recency.
     """
-    clean_ticker = ticker.upper().strip()
-    search_term = f"{clean_ticker} {query}".strip() if query else clean_ticker
-    headers = {
-        "User-Agent": "python:companyscope:v0.2.0 (by /u/companyscope_research)"
-    }
-    items: list[dict[str, Any]] = []
-    current_year = datetime.datetime.now(datetime.timezone.utc).year
-
-    # 1. Reddit public JSON API across r/stocks, r/investing, r/wallstreetbets
-    try:
-        reddit_url = (
-            "https://www.reddit.com/r/stocks+investing+wallstreetbets/search.json"
-        )
-        r_red = requests.get(
-            reddit_url,
-            params={
-                "q": search_term,
-                "restrict_sr": "on",
-                "sort": "relevance",
-                "t": "year",
-                "limit": str(max(limit, 6)),
-            },
-            headers=headers,
-            timeout=8,
-        )
-        if r_red.ok:
-            children = ((r_red.json() or {}).get("data") or {}).get("children") or []
-            for idx, child in enumerate(children):
-                post = (child or {}).get("data") or {}
-                title = " ".join(str(post.get("title") or "").split())
-                selftext = " ".join(str(post.get("selftext") or "").split())
-                if not title:
-                    continue
-                subreddit = str(post.get("subreddit_name_prefixed") or "r/stocks")
-                score = int(post.get("score") or 0)
-                num_comments = int(post.get("num_comments") or 0)
-                created_utc = post.get("created_utc")
-                post_year = (
-                    datetime.datetime.fromtimestamp(
-                        float(created_utc), tz=datetime.timezone.utc
-                    ).year
-                    if created_utc
-                    else current_year
-                )
-                post_id = str(post.get("id") or idx)
-                permalink = str(post.get("permalink") or "")
-                post_url = (
-                    f"https://www.reddit.com{permalink}" if permalink else ""
-                )
-
-                snippet = selftext[:450] if selftext else title
-                chunk_text = (
-                    f"[{subreddit} | Score: {score} | Comments: {num_comments}] "
-                    f"Title: {title}. Post: {snippet}"
-                )
-                items.append(
-                    {
-                        "chunk_id": f"{clean_ticker}_{post_year}_REDDIT_{post_id}",
-                        "chunk_text": chunk_text,
-                        "ticker": clean_ticker,
-                        "year": post_year,
-                        "section": f"Reddit ({subreddit})",
-                        "source_type": "social_sentiment",
-                        "url": post_url,
-                    }
-                )
-                if len(items) >= (limit // 2) + 1:
-                    break
-    except Exception:
-        pass
-
-    # 2. Yahoo Finance Search News JSON API
-    try:
-        yf_search_url = "https://query2.finance.yahoo.com/v1/finance/search"
-        r_yf = requests.get(
-            yf_search_url,
-            params={"q": search_term, "newsCount": str(limit), "quotesCount": "0"},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=8,
-        )
-        if r_yf.ok:
-            news_list = (r_yf.json() or {}).get("news") or []
-            for idx, article in enumerate(news_list):
-                title = " ".join(str(article.get("title") or "").split())
-                if not title:
-                    continue
-                publisher = str(article.get("publisher") or "Yahoo Finance")
-                link = str(article.get("link") or "")
-                pub_time = article.get("providerPublishTime")
-                art_year = (
-                    datetime.datetime.fromtimestamp(
-                        float(pub_time), tz=datetime.timezone.utc
-                    ).year
-                    if pub_time
-                    else current_year
-                )
-                uuid_short = str(article.get("uuid") or idx)[:8]
-                chunk_text = f"[News: {publisher}] Headline: {title}"
-                items.append(
-                    {
-                        "chunk_id": f"{clean_ticker}_{art_year}_NEWS_{uuid_short}",
-                        "chunk_text": chunk_text,
-                        "ticker": clean_ticker,
-                        "year": art_year,
-                        "section": f"News ({publisher})",
-                        "source_type": "financial_news",
-                        "url": link,
-                    }
-                )
-                if len(items) >= limit:
-                    break
-    except Exception:
-        pass
-
-    # 3. Yahoo Finance RSS Feed fallback if needed
-    if len(items) < limit:
-        try:
-            rss_url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={clean_ticker}&region=US&lang=en-US"
-            r_rss = requests.get(
-                rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8
-            )
-            if r_rss.ok and r_rss.text:
-                root = ET.fromstring(r_rss.text)
-                for idx, item_el in enumerate(root.findall(".//item")):
-                    title = " ".join(
-                        (item_el.findtext("title") or "").split()
-                    )
-                    desc = " ".join(
-                        (item_el.findtext("description") or "").split()
-                    )
-                    link = (item_el.findtext("link") or "").strip()
-                    if not title:
-                        continue
-                    chunk_text = (
-                        f"[Yahoo Finance RSS] Headline: {title}. Summary: {desc[:350]}"
-                        if desc
-                        else f"[Yahoo Finance RSS] Headline: {title}"
-                    )
-                    items.append(
-                        {
-                            "chunk_id": f"{clean_ticker}_{current_year}_YFRSS_{idx}",
-                            "chunk_text": chunk_text,
-                            "ticker": clean_ticker,
-                            "year": current_year,
-                            "section": "Yahoo Finance News",
-                            "source_type": "financial_news",
-                            "url": link,
-                        }
-                    )
-                    if len(items) >= limit:
-                        break
-        except Exception:
-            pass
-
-    return items[:limit]
+    return fetch_fresh_news_and_sentiment(ticker=ticker, query=query, limit=limit)
 
 
 def calculator(expression: str) -> float:
