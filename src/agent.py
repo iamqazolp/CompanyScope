@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from contextlib import nullcontext
 import json
 import os
@@ -10,6 +11,10 @@ import requests
 
 from src.config import (
     DEFAULT_TICKER,
+    GPT6_1_TERRA_CACHE_WRITE_PRICE_PER_1M,
+    GPT6_1_TERRA_CACHED_INPUT_PRICE_PER_1M,
+    GPT6_1_TERRA_INPUT_PRICE_PER_1M,
+    GPT6_1_TERRA_OUTPUT_PRICE_PER_1M,
     GPT6_LUNA_CACHE_WRITE_PRICE_PER_1M,
     GPT6_LUNA_CACHED_INPUT_PRICE_PER_1M,
     GPT6_LUNA_INPUT_PRICE_PER_1M,
@@ -19,11 +24,14 @@ from src.config import (
     LANGFUSE_SECRET_KEY,
     LLM_TIMEOUT,
     OPENAI_KEY,
-    OPENAI_MODEL,
     OPENAI_URL,
+    TIER1_MODEL,
+    TIER2_MODEL,
     propagate_trace_attributes,
 )
 from src.guard import check_citations, verify_citations
+from src.market import get_insider_and_events, get_live_market_data
+from src.tier_router import escalate_on_guard_failure, resolve_single_agent_tier
 from src.tools import (
     calculator,
     get_earnings_transcripts,
@@ -77,8 +85,24 @@ def _obs_context(lf: Any, **kwargs: Any) -> Any:
     return nullcontext(None)
 
 
-def get_model_pricing(model_name: str = "gpt-6-luna") -> dict[str, float]:
-    """Loads per-1M-token USD pricing for a model from src/model_pricing.json, falling back to config defaults."""
+def get_model_pricing(model_name: str = TIER2_MODEL) -> dict[str, float]:
+    """Loads per-1M-token USD pricing for a model from src/model_pricing.json, falling back to tier config defaults."""
+    is_terra = "terra" in model_name.lower()
+    fb_in = GPT6_1_TERRA_INPUT_PRICE_PER_1M if is_terra else GPT6_LUNA_INPUT_PRICE_PER_1M
+    fb_cached = (
+        GPT6_1_TERRA_CACHED_INPUT_PRICE_PER_1M
+        if is_terra
+        else GPT6_LUNA_CACHED_INPUT_PRICE_PER_1M
+    )
+    fb_cw = (
+        GPT6_1_TERRA_CACHE_WRITE_PRICE_PER_1M
+        if is_terra
+        else GPT6_LUNA_CACHE_WRITE_PRICE_PER_1M
+    )
+    fb_out = (
+        GPT6_1_TERRA_OUTPUT_PRICE_PER_1M if is_terra else GPT6_LUNA_OUTPUT_PRICE_PER_1M
+    )
+
     pricing_path = os.path.join(os.path.dirname(__file__), "model_pricing.json")
     if os.path.exists(pricing_path):
         try:
@@ -87,30 +111,22 @@ def get_model_pricing(model_name: str = "gpt-6-luna") -> dict[str, float]:
             entry = registry.get(model_name) or registry.get(model_name.lower())
             if isinstance(entry, dict):
                 return {
-                    "input_per_1m": float(
-                        entry.get("input_per_1m", GPT6_LUNA_INPUT_PRICE_PER_1M)
-                    ),
+                    "input_per_1m": float(entry.get("input_per_1m", fb_in)),
                     "cached_input_per_1m": float(
-                        entry.get(
-                            "cached_input_per_1m", GPT6_LUNA_CACHED_INPUT_PRICE_PER_1M
-                        )
+                        entry.get("cached_input_per_1m", fb_cached)
                     ),
                     "cache_write_per_1m": float(
-                        entry.get(
-                            "cache_write_per_1m", GPT6_LUNA_CACHE_WRITE_PRICE_PER_1M
-                        )
+                        entry.get("cache_write_per_1m", fb_cw)
                     ),
-                    "output_per_1m": float(
-                        entry.get("output_per_1m", GPT6_LUNA_OUTPUT_PRICE_PER_1M)
-                    ),
+                    "output_per_1m": float(entry.get("output_per_1m", fb_out)),
                 }
         except Exception:
             pass
     return {
-        "input_per_1m": GPT6_LUNA_INPUT_PRICE_PER_1M,
-        "cached_input_per_1m": GPT6_LUNA_CACHED_INPUT_PRICE_PER_1M,
-        "cache_write_per_1m": GPT6_LUNA_CACHE_WRITE_PRICE_PER_1M,
-        "output_per_1m": GPT6_LUNA_OUTPUT_PRICE_PER_1M,
+        "input_per_1m": fb_in,
+        "cached_input_per_1m": fb_cached,
+        "cache_write_per_1m": fb_cw,
+        "output_per_1m": fb_out,
     }
 
 
@@ -210,7 +226,7 @@ TOOLS_LIST: list[dict[str, Any]] = [
                 "properties": {
                     "ticker": {
                         "type": "string",
-                        "description": "The stock ticker symbol, e.g., AAPL",
+                        "description": "The stock ticker symbol, e.g., NVDA, JPM, MSFT, PLTR",
                     },
                     "concept": {
                         "type": "string",
@@ -218,7 +234,7 @@ TOOLS_LIST: list[dict[str, Any]] = [
                     },
                     "year": {
                         "type": "string",
-                        "description": "The year of the financial data, e.g., '2024'",
+                        "description": "The fiscal year of the financial data, e.g., '2025', '2026', or 'latest' for the most recent annual 10-K",
                     },
                 },
                 "required": ["ticker", "concept", "year"],
@@ -284,7 +300,7 @@ TOOLS_LIST: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_market_sentiment",
-            "description": "Fetches public market sentiment, Reddit discussions (r/stocks, r/investing, r/wallstreetbets), and recent Yahoo Finance news headlines for a given company ticker.",
+            "description": "Fetches fresh 24h-7d financial news (Google News, Yahoo Finance, Finnhub) and recent Reddit investor discussions (r/stocks, r/investing, r/wallstreetbets, r/SecurityAnalysis) for a given company ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -295,6 +311,40 @@ TOOLS_LIST: list[dict[str, Any]] = [
                     "query": {
                         "type": "string",
                         "description": "Optional topic or keyword filter (e.g., 'AI iPhone sales', 'valuation')",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_live_market_data",
+            "description": "Fetches live stock price, 1-day % change, Market Cap, Enterprise Value, Trailing & Forward P/E, EV/EBITDA, 52-week high/low, and Wall Street analyst consensus target price.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "The stock ticker symbol, e.g., AAPL",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_insider_and_events",
+            "description": "Fetches live SEC Form 4 executive/director insider stock buys and sales alongside recent Form 8-K material corporate event filings.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "The stock ticker symbol, e.g., AAPL",
                     },
                 },
                 "required": ["ticker"],
@@ -325,6 +375,8 @@ TOOL_FUNCTIONS: dict[str, Any] = {
     "search_filings": search_filings,
     "get_earnings_transcripts": get_earnings_transcripts,
     "get_market_sentiment": get_market_sentiment,
+    "get_live_market_data": get_live_market_data,
+    "get_insider_and_events": get_insider_and_events,
     "calculator": calculator,
 }
 
@@ -381,7 +433,7 @@ def _call_llm(
 
     lf = _get_langfuse()
     active_tools = tools_override if tools_override is not None else TOOLS_LIST
-    active_model = model or OPENAI_MODEL
+    active_model = model or TIER2_MODEL
     url = f"{OPENAI_URL}/v1/chat/completions"
     payload: dict[str, Any] = {
         "model": active_model,
@@ -498,6 +550,16 @@ Please try to answer the user's question using ONLY this context. If the answer 
         return {"error": f"Fallback RAG failed: {str(e)}"}
 
 
+def _emit_event(
+    event_cb: Callable[[dict[str, Any]], None] | None, payload: dict[str, Any]
+) -> None:
+    if event_cb is not None:
+        try:
+            event_cb(payload)
+        except Exception:
+            pass
+
+
 def process_query(
     question: str,
     ticker: str = DEFAULT_TICKER,
@@ -506,6 +568,7 @@ def process_query(
     model: str | None = None,
     session_id: str | None = None,
     user_id: str | None = None,
+    event_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """
     Process query using LLM and tools with multi-turn support, citation verification,
@@ -513,6 +576,22 @@ def process_query(
     """
     start_time = time.time()
     ticker = (ticker or DEFAULT_TICKER).upper().strip()
+    tier_decision = resolve_single_agent_tier(
+        question=question, ticker=ticker, explicit_model=model
+    )
+    _emit_event(
+        event_cb,
+        {
+            "type": "plan",
+            "mode": "single",
+            "tickers": [ticker],
+            "specialists": ["unified"],
+            "tier": tier_decision.tier,
+            "model": tier_decision.model,
+            "escalated": tier_decision.escalated,
+            "escalation_reason": tier_decision.reason,
+        },
+    )
 
     try:
         system_prompt = load_system_prompt()
@@ -539,7 +618,7 @@ def process_query(
     tool_trace: list[dict[str, Any]] = []
     self_correction_count = 0
     total_cost_usd = 0.0
-    active_model_used = model or OPENAI_MODEL
+    active_model_used = tier_decision.model
 
     lf = _get_langfuse()
     trace_url: str | None = None
@@ -548,12 +627,23 @@ def process_query(
         lf,
         as_type="agent",
         name="companyscope_query",
-        input={"question": question, "ticker": ticker},
+        input={
+            "question": question,
+            "ticker": ticker,
+            "tier": tier_decision.tier,
+            "initial_model": tier_decision.model,
+        },
     ) as root_span, propagate_trace_attributes(
         lf,
         session_id=session_id,
         user_id=user_id,
-        tags=["company-scope", "single-agent", f"ticker:{ticker}"],
+        tags=[
+            "company-scope",
+            "single-agent",
+            f"ticker:{ticker}",
+            f"tier:{tier_decision.tier}",
+            f"model:{tier_decision.model}",
+        ],
         trace_name="companyscope_query",
     ):
         if lf is not None:
@@ -568,7 +658,7 @@ def process_query(
                     messages=messages,
                     use_tools=True,
                     provider=provider,
-                    model=model,
+                    model=tier_decision.model,
                 )
                 total_cost_usd += float(
                     (message.get("_cost_details") or {}).get("total", 0.0)
@@ -601,6 +691,17 @@ def process_query(
 
                         obs_type = (
                             "retriever" if func_name == "search_filings" else "tool"
+                        )
+                        _emit_event(
+                            event_cb,
+                            {
+                                "type": "tool_call",
+                                "agent": f"SINGLE_{ticker}",
+                                "ticker": ticker,
+                                "role": "unified",
+                                "tool": func_name,
+                                "args": func_args,
+                            },
                         )
                         with _obs_context(
                             lf,
@@ -654,13 +755,40 @@ def process_query(
                             _valid_cits, invalid_cits = check_citations(
                                 parsed, tool_results_history
                             )
+                            _emit_event(
+                                event_cb,
+                                {
+                                    "type": "guard_check",
+                                    "scope": "single",
+                                    "valid_count": len(_valid_cits),
+                                    "invalid_count": len(invalid_cits),
+                                },
+                            )
                             if invalid_cits and self_correction_count < 1:
                                 self_correction_count += 1
+                                next_decision = escalate_on_guard_failure(
+                                    tier_decision, explicit_model=model
+                                )
+                                if next_decision.model != tier_decision.model:
+                                    _emit_event(
+                                        event_cb,
+                                        {
+                                            "type": "tier_escalation",
+                                            "agent": f"SINGLE_{ticker}",
+                                            "from_model": tier_decision.model,
+                                            "to_model": next_decision.model,
+                                            "reason": next_decision.reason,
+                                        },
+                                    )
+                                    tier_decision = next_decision
                                 with _obs_context(
                                     lf,
                                     as_type="guardrail",
                                     name="guard:self_correction",
-                                    input={"invalid_citations": invalid_cits},
+                                    input={
+                                        "invalid_citations": invalid_cits,
+                                        "retry_model": tier_decision.model,
+                                    },
                                 ) as sc_span:
                                     if sc_span is not None:
                                         try:
@@ -706,6 +834,29 @@ def process_query(
                             parsed["tool_trace"] = tool_trace
                             parsed["self_corrections"] = self_correction_count
                             parsed["model"] = active_model_used
+                            parsed["tier"] = tier_decision.tier
+                            parsed["escalated"] = tier_decision.escalated
+                            parsed["escalation_reason"] = tier_decision.reason
+                            parsed["tier_breakdown"] = {
+                                "supervisor_model": active_model_used,
+                                "tier1_model": TIER1_MODEL,
+                                "tier2_model": TIER2_MODEL,
+                                "tier1_agents": (
+                                    [f"SINGLE_{ticker}"]
+                                    if tier_decision.tier == "tier1"
+                                    else []
+                                ),
+                                "tier2_agents": (
+                                    [f"SINGLE_{ticker}"]
+                                    if tier_decision.tier == "tier2"
+                                    else []
+                                ),
+                                "escalated_agents": (
+                                    [f"SINGLE_{ticker}"]
+                                    if tier_decision.escalated
+                                    else []
+                                ),
+                            }
                             parsed["cost_usd"] = round(total_cost_usd, 6)
                             parsed["latency_ms"] = round(
                                 (time.time() - start_time) * 1000
@@ -799,7 +950,7 @@ def process_query(
                         system_prompt,
                         f"Agent loop encountered an error: {err_str}",
                         provider=provider,
-                        model=model,
+                        model=model or TIER1_MODEL,
                     )
                     if trace_url:
                         fb_res["trace_url"] = trace_url
@@ -821,7 +972,7 @@ def process_query(
             system_prompt,
             "Max iterations (6) reached without a final answer.",
             provider=provider,
-            model=model,
+            model=model or TIER1_MODEL,
         )
         if trace_url:
             fb_res["trace_url"] = trace_url

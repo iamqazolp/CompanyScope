@@ -1,4 +1,12 @@
 {
+  "gpt-6.1-terra": {
+    "match_pattern": "(?i)^([a-z0-9_-]+/)?(gpt\\-6\\.1\\-terra)$",
+    "input_per_1m": 2.0,
+    "cached_input_per_1m": 0.2,
+    "cache_write_per_1m": 2.5,
+    "output_per_1m": 8.0,
+    "tokenizer_id": "openai"
+  },
   "gpt-6-luna": {
     "match_pattern": "(?i)^([a-z0-9_-]+/)?(gpt\\-6\\-luna)$",
     "input_per_1m": 0.1,

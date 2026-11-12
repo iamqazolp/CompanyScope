@@ -3,9 +3,7 @@ import datetime
 import operator
 import re
 from typing import Any
-import xml.etree.ElementTree as ET
 
-from edgar import Company, set_identity
 from rank_bm25 import BM25Okapi
 import requests
 
@@ -19,8 +17,26 @@ from src.config import (
     get_langfuse,
     obs_context,
 )
-from src.embed import build_index, get_collection, get_embedding_model
+from edgar import Company, set_identity
+from src.db import (
+    get_cached_financials,
+    get_market_cache,
+    has_ticker_chunks_pg,
+    hybrid_search_pg,
+    set_cached_financials,
+    set_market_cache,
+)
+from src.embed import (
+    _load_chunks_from_jsonl,
+    build_index,
+    get_collection,
+    get_embedding_model,
+    is_cloud_vector_enabled,
+    is_local_chroma_available,
+)
+from src.embeddings import embed_query_cloud, get_active_embedding_model_name
 from src.ingest import ingest_company
+from src.market import fetch_fresh_news_and_sentiment
 
 # Configure EDGAR identity
 set_identity(EDGAR_IDENTITY)
@@ -35,11 +51,13 @@ def _tokenize(text: str) -> list[str]:
 STATEMENT_CONCEPT_ALIASES: dict[str, list[str]] = {
     "revenues": [
         "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "RevenuesNetOfInterestExpense",
         "Revenues",
         "SalesRevenueNet",
     ],
     "revenue": [
         "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "RevenuesNetOfInterestExpense",
         "Revenues",
         "SalesRevenueNet",
     ],
@@ -246,30 +264,42 @@ def get_financial_data(ticker: str, concept: str, year: int | str) -> dict[str, 
         filings = company.get_filings(form="10-K")
 
         target_filing = None
-        for filing in filings:
-            if filing.report_date and str(filing.report_date).startswith(year_str):
-                target_filing = filing
-                break
-
-        if not target_filing:
+        if year_str.lower() in ("", "latest", "recent", "current", "fy"):
+            if len(filings) > 0:
+                target_filing = filings[0]
+                year_str = str(
+                    target_filing.report_date or target_filing.filing_date
+                )[:4]
+        else:
             for filing in filings:
-                if str(filing.filing_date).startswith(year_str):
+                if filing.report_date and str(filing.report_date).startswith(year_str):
                     target_filing = filing
                     break
 
-        if not target_filing:
-            # Fallback to 10-Q filings if a 10-K for that year does not exist yet
-            q_filings = company.get_filings(form="10-Q")
-            for filing in q_filings:
-                if (
-                    filing.report_date
-                    and str(filing.report_date).startswith(year_str)
-                ) or str(filing.filing_date).startswith(year_str):
-                    target_filing = filing
-                    break
+            if not target_filing:
+                for filing in filings:
+                    if str(filing.filing_date).startswith(year_str):
+                        target_filing = filing
+                        break
+
+            if not target_filing:
+                # Fallback to 10-Q filings if a 10-K for that year does not exist yet
+                q_filings = company.get_filings(form="10-Q")
+                for filing in q_filings:
+                    if (
+                        filing.report_date
+                        and str(filing.report_date).startswith(year_str)
+                    ) or str(filing.filing_date).startswith(year_str):
+                        target_filing = filing
+                        break
 
         if not target_filing:
-            return {"error": f"10-K filing for {year_str} not found"}
+            avail = [
+                str(f.report_date or f.filing_date)[:4] for f in list(filings)[:5]
+            ]
+            return {
+                "error": f"10-K filing for {year_str} not found. Available 10-K years for {ticker}: {', '.join(avail)}"
+            }
 
         tenk = target_filing.obj()
         if not tenk or not hasattr(tenk, "financials"):
@@ -329,7 +359,14 @@ def get_financial_data(ticker: str, concept: str, year: int | str) -> dict[str, 
             method_name = f"get_{concept_lower}"
 
         value = None
-        if method_name and hasattr(financials, method_name):
+        if method_name == "get_revenue":
+            # Banks report top-line Total Net Revenue under RevenuesNetOfInterestExpense
+            bank_rev = _lookup_concept_in_statements(
+                financials, "RevenuesNetOfInterestExpense", year_str
+            )
+            if bank_rev is not None:
+                value = bank_rev
+        if value is None and method_name and hasattr(financials, method_name):
             method = getattr(financials, method_name)
             value = method()
 
@@ -371,11 +408,371 @@ def get_financial_data(ticker: str, concept: str, year: int | str) -> dict[str, 
         return {"error": f"Failed to get financial data: {str(e)}"}
 
 
+def _enrich_statement_row(base: dict[str, Any]) -> dict[str, Any]:
+    """Computes derived margins, Free Cash Flow, Net Cash, ROE, and Debt/Equity from raw XBRL lines."""
+    rev = base.get("Revenue")
+    gp = base.get("Gross Profit")
+    op = base.get("Operating Income")
+    ni = base.get("Net Income")
+    ocf = base.get("Operating Cash Flow")
+    capex = base.get("CapEx")
+    cash = base.get("Cash & Equivalents")
+    debt = base.get("Long-Term Debt")
+    eq = base.get("Stockholders Equity")
+
+    fcf = base.get("Free Cash Flow")
+    if fcf is None and ocf is not None:
+        fcf = (ocf - abs(capex)) if capex is not None else ocf
+        base["Free Cash Flow"] = fcf
+
+    if cash is not None or debt is not None:
+        base["Net Cash"] = (cash or 0.0) - abs(debt or 0.0)
+    else:
+        base["Net Cash"] = None
+
+    def _pct(num: float | None, den: float | None) -> float | None:
+        if num is None or den is None or abs(den) == 0:
+            return None
+        return round((num / den) * 100.0, 2)
+
+    base["Gross Margin %"] = _pct(gp, rev)
+    base["Operating Margin %"] = _pct(op, rev)
+    base["Net Margin %"] = _pct(ni, rev)
+    base["FCF Margin %"] = _pct(fcf, rev)
+    base["ROE %"] = _pct(ni, eq) if (eq is not None and eq > 0) else None
+    base["Debt / Equity"] = (
+        round(abs(debt) / eq, 2)
+        if (debt is not None and eq is not None and eq > 0)
+        else None
+    )
+    return base
+
+
+def _extract_facts_bundle(
+    clean_ticker: str, years: list[int] | None = None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Extracts full 5-year Annual (10-K) AND 6-quarter (10-Q) XBRL Income Statement,
+    Balance Sheet, Cash Flow, and Ratio tables in a single ~0.5s SEC CompanyFacts call.
+    """
+    import pandas as pd
+
+    facts_obj = Company(clean_ticker).get_facts()
+    if facts_obj is None or not hasattr(facts_obj, "to_dataframe"):
+        return [], []
+    df = facts_obj.to_dataframe()
+    if df is None or df.empty:
+        return [], []
+
+    work = df.dropna(subset=["numeric_value", "period_end"]).copy()
+    if work.empty:
+        return [], []
+
+    work["pe_dt"] = pd.to_datetime(work["period_end"], errors="coerce")
+    work["ps_dt"] = pd.to_datetime(work["period_start"], errors="coerce")
+    work = work.dropna(subset=["pe_dt"])
+    work["days"] = (work["pe_dt"] - work["ps_dt"]).dt.days
+    work["yr"] = work["pe_dt"].dt.year
+    work["ym"] = work["pe_dt"].dt.strftime("%Y-%m")
+
+    line_specs: list[tuple[str, tuple[str, ...], bool, str]] = [
+        (
+            "Revenue",
+            (
+                "RevenueFromContractWithCustomerExcludingAssessedTax",
+                "RevenuesNetOfInterestExpense",
+                "Revenues",
+                "SalesRevenueNet",
+            ),
+            True,
+            "USD",
+        ),
+        (
+            "Gross Profit",
+            ("GrossProfit",),
+            True,
+            "USD",
+        ),
+        (
+            "R&D Expense",
+            ("ResearchAndDevelopmentExpense",),
+            True,
+            "USD",
+        ),
+        (
+            "SG&A Expense",
+            ("SellingGeneralAndAdministrativeExpense",),
+            True,
+            "USD",
+        ),
+        (
+            "Operating Income",
+            (
+                "OperatingIncomeLoss",
+                "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+            ),
+            True,
+            "USD",
+        ),
+        (
+            "Net Income",
+            ("NetIncomeLoss", "ProfitLoss"),
+            True,
+            "USD",
+        ),
+        (
+            "Diluted EPS",
+            ("EarningsPerShareDiluted", "EarningsPerShareBasic"),
+            True,
+            "USD per share",
+        ),
+        (
+            "Cash & Equivalents",
+            (
+                "CashCashEquivalentsAndShortTermInvestments",
+                "CashAndCashEquivalentsAtCarryingValue",
+                "CashAndDueFromBanks",
+            ),
+            False,
+            "USD",
+        ),
+        ("Total Assets", ("Assets",), False, "USD"),
+        (
+            "Long-Term Debt",
+            (
+                "LongTermDebtNoncurrent",
+                "LongTermDebt",
+                "LongTermDebtAndCapitalLeaseObligations",
+            ),
+            False,
+            "USD",
+        ),
+        ("Total Liabilities", ("Liabilities",), False, "USD"),
+        (
+            "Stockholders Equity",
+            (
+                "StockholdersEquity",
+                "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+            ),
+            False,
+            "USD",
+        ),
+        (
+            "Operating Cash Flow",
+            ("NetCashProvidedByUsedInOperatingActivities",),
+            True,
+            "USD",
+        ),
+        (
+            "CapEx",
+            (
+                "PaymentsToAcquirePropertyPlantAndEquipment",
+                "PaymentsToAcquireProductiveAssets",
+            ),
+            True,
+            "USD",
+        ),
+        (
+            "Share Repurchases",
+            ("PaymentsForRepurchaseOfCommonStock",),
+            True,
+            "USD",
+        ),
+        (
+            "Dividends Paid",
+            (
+                "PaymentsOfDividendsCommonStock",
+                "PaymentsOfDividends",
+            ),
+            True,
+            "USD",
+        ),
+    ]
+
+    # 1. Annual (FY) extraction
+    fy_df = work[work["fiscal_period"] == "FY"]
+    annual_maps: dict[str, dict[int, float]] = {}
+    for label, suffixes, is_flow, unit_filter in line_specs:
+        sub = fy_df[fy_df["unit"] == unit_filter]
+        if is_flow:
+            sub = sub[(sub["days"] >= 330) & (sub["days"] <= 385)]
+        else:
+            sub = sub[sub["days"].isna()]
+        out_yr: dict[int, float] = {}
+        for suf in suffixes:
+            matched = sub[
+                sub["concept"].str.endswith(f":{suf}") | (sub["concept"] == suf)
+            ]
+            if matched.empty:
+                continue
+            grouped = (
+                matched.sort_values("pe_dt")
+                .groupby("yr")["numeric_value"]
+                .last()
+                .to_dict()
+            )
+            for k_yr, v_num in grouped.items():
+                yi = int(k_yr)
+                if yi not in out_yr and pd.notna(v_num):
+                    out_yr[yi] = float(v_num)
+        annual_maps[label] = out_yr
+
+    all_yrs = sorted(
+        set(annual_maps["Revenue"])
+        | set(annual_maps["Net Income"])
+        | set(annual_maps["Operating Income"])
+        | set(annual_maps["Operating Cash Flow"])
+    )
+    chosen_yrs = (
+        [y for y in years if y in all_yrs] if years is not None else all_yrs[-5:]
+    )
+
+    annual_rows: list[dict[str, Any]] = []
+    for yr in chosen_yrs:
+        row_a: dict[str, Any] = {
+            "year": yr,
+            "period": f"FY{str(yr)[-2:]}",
+        }
+        for label, _, _, _ in line_specs:
+            val = annual_maps[label].get(yr)
+            if label in ("CapEx", "Share Repurchases", "Dividends Paid") and val is not None:
+                val = abs(val)
+            row_a[label] = round(val, 2) if (label == "Diluted EPS" and val is not None) else val
+        annual_rows.append(_enrich_statement_row(row_a))
+
+    # 2. Quarterly (~90-day 10-Q/comparative) extraction keyed by YYYY-MM
+    q_flow = work[
+        work["fiscal_period"].isin(["Q1", "Q2", "Q3", "Q4"])
+        & (work["days"] >= 75)
+        & (work["days"] <= 105)
+    ]
+    q_inst = work[work["days"].isna()]
+
+    q_maps: dict[str, dict[str, float]] = {}
+    q_fp_labels: dict[str, str] = {}
+    if not q_flow.empty:
+        fp_grp = (
+            q_flow.sort_values("pe_dt")
+            .groupby("ym")["fiscal_period"]
+            .last()
+            .to_dict()
+        )
+        for ym_k, fp_v in fp_grp.items():
+            q_fp_labels[str(ym_k)] = f"{fp_v} '{str(ym_k)[2:4]}"
+
+    # Quarterly cash flows in 10-Qs are often reported YTD (90d Q1, 180d Q2, 270d Q3) or 90d standalone;
+    # capture standalone 75-105d flows seamlessly
+    for label, suffixes, is_flow, unit_filter in line_specs:
+        base_q = q_flow if is_flow else q_inst
+        sub_q = base_q[base_q["unit"] == unit_filter]
+        out_ym: dict[str, float] = {}
+        for suf in suffixes:
+            matched = sub_q[
+                sub_q["concept"].str.endswith(f":{suf}") | (sub_q["concept"] == suf)
+            ]
+            if matched.empty:
+                continue
+            grouped_q = (
+                matched.sort_values("pe_dt")
+                .groupby("ym")["numeric_value"]
+                .last()
+                .to_dict()
+            )
+            for k_ym, v_num in grouped_q.items():
+                ym_s = str(k_ym)
+                if ym_s not in out_ym and pd.notna(v_num):
+                    out_ym[ym_s] = float(v_num)
+        q_maps[label] = out_ym
+
+    all_yms = sorted(
+        set(q_maps["Revenue"]) | set(q_maps["Net Income"])
+    )
+    chosen_yms = all_yms[-6:]
+    quarterly_rows: list[dict[str, Any]] = []
+    for ym in chosen_yms:
+        yr_int = int(ym[:4])
+        row_q: dict[str, Any] = {
+            "year": yr_int,
+            "period": q_fp_labels.get(ym, ym),
+            "period_end": ym,
+        }
+        for label, _, _, _ in line_specs:
+            val_q = q_maps[label].get(ym)
+            if label in ("CapEx", "Share Repurchases", "Dividends Paid") and val_q is not None:
+                val_q = abs(val_q)
+            row_q[label] = (
+                round(val_q, 2)
+                if (label == "Diluted EPS" and val_q is not None)
+                else val_q
+            )
+        quarterly_rows.append(_enrich_statement_row(row_q))
+
+    return annual_rows, quarterly_rows
+
+
+def get_company_financial_bundle(ticker: str) -> dict[str, Any]:
+    """Returns 24h-cached Annual (5Y 10-K) and Quarterly (6Q 10-Q) multi-statement XBRL tables."""
+    clean_ticker = ticker.upper().strip()
+    bundle_key = f"fin_bundle_v2:{clean_ticker}"
+    cached_bundle = get_market_cache(bundle_key, ttl_seconds=86400)
+    if isinstance(cached_bundle, dict) and cached_bundle.get("annual"):
+        return cached_bundle
+
+    try:
+        annual_rows, quarterly_rows = _extract_facts_bundle(clean_ticker)
+        if annual_rows:
+            bundle = {
+                "ticker": clean_ticker,
+                "annual": annual_rows,
+                "quarterly": quarterly_rows,
+            }
+            set_market_cache(bundle_key, bundle)
+            set_cached_financials(clean_ticker, annual_rows)
+            return bundle
+    except Exception:
+        pass
+
+    fallback_annual = get_company_financial_summary(clean_ticker)
+    return {
+        "ticker": clean_ticker,
+        "annual": fallback_annual,
+        "quarterly": [],
+    }
+
+
 def get_company_financial_summary(
     ticker: str, years: list[int] | None = None
 ) -> list[dict[str, Any]]:
-    """Fetches a multi-year table of core financial metrics for dashboard visualization."""
-    target_years = years or [2021, 2022, 2023, 2024, 2025]
+    """Fetches a multi-year table of core financial metrics for dashboard visualization (24h cached)."""
+    clean_ticker = ticker.upper().strip()
+    if years is None:
+        cached = get_cached_financials(clean_ticker)
+        if (
+            cached is not None
+            and len(cached) >= 2
+            and "Gross Margin %" in cached[-1]
+        ):
+            return cached
+
+    try:
+        annual_rows, quarterly_rows = _extract_facts_bundle(clean_ticker, years=years)
+        if annual_rows:
+            if years is None:
+                set_cached_financials(clean_ticker, annual_rows)
+                set_market_cache(
+                    f"fin_bundle_v2:{clean_ticker}",
+                    {
+                        "ticker": clean_ticker,
+                        "annual": annual_rows,
+                        "quarterly": quarterly_rows,
+                    },
+                )
+            return annual_rows
+    except Exception:
+        pass
+
+    current_yr = datetime.datetime.now(datetime.timezone.utc).year
+    target_years = years or list(range(current_yr - 4, current_yr + 1))
     metrics = [
         ("Revenue", "Revenues"),
         ("Net Income", "NetIncomeLoss"),
@@ -390,14 +787,104 @@ def get_company_financial_summary(
         row: dict[str, Any] = {"year": yr}
         has_any = False
         for label, concept_key in metrics:
-            res = get_financial_data(ticker, concept_key, yr)
+            res = get_financial_data(clean_ticker, concept_key, yr)
             val = res.get("value") if "error" not in res else None
             row[label] = val
             if isinstance(val, (int, float)):
                 has_any = True
         if has_any:
             rows.append(row)
+
+    if years is None and rows:
+        set_cached_financials(clean_ticker, rows)
     return rows
+
+
+def _default_auto_ingest_years(year: str | int | None = None) -> list[int]:
+    if year is not None and str(year).strip():
+        try:
+            return [int(str(year).strip())]
+        except ValueError:
+            pass
+    cur = datetime.datetime.now(datetime.timezone.utc).year
+    return [cur - 1, cur]
+
+
+def _bm25_jsonl_fallback(
+    query: str,
+    ticker: str | None,
+    year: str | int | None,
+    section: str | None,
+    k_limit: int,
+) -> list[dict[str, Any]]:
+    """Zero-DB lexical fallback over bundled/ingested chunks.jsonl when neither Postgres nor Chroma is active."""
+    rows = _load_chunks_from_jsonl(ticker_filter=ticker)
+    if not rows and ticker and ticker not in _auto_ingested_tickers:
+        _auto_ingested_tickers.add(ticker)
+        try:
+            ingest_company(ticker=ticker, years=_default_auto_ingest_years(year))
+            rows = _load_chunks_from_jsonl(ticker_filter=ticker)
+        except Exception:
+            rows = []
+    if not rows:
+        return []
+    year_int: int | None = None
+    if year is not None and str(year).strip():
+        try:
+            year_int = int(str(year).strip())
+        except ValueError:
+            year_int = None
+
+    sec_clean: str | None = None
+    if section and str(section).strip():
+        sec_clean = str(section).strip()
+        if not sec_clean.lower().startswith("item"):
+            sec_clean = f"Item {sec_clean}"
+
+    filtered = [
+        r
+        for r in rows
+        if (year_int is None or int(r["year"]) == year_int)
+        and (sec_clean is None or str(r["section"]) == sec_clean)
+    ]
+    if not filtered and sec_clean is not None:
+        filtered = [
+            r for r in rows if (year_int is None or int(r["year"]) == year_int)
+        ]
+    if not filtered:
+        return []
+
+    tokenized = [_tokenize(r["chunk_text"]) for r in filtered]
+    q_tokens = _tokenize(query)
+    if not q_tokens or not any(tokenized):
+        return [
+            {
+                "chunk_text": r["chunk_text"],
+                "ticker": r["ticker"],
+                "year": r["year"],
+                "section": r["section"],
+                "chunk_id": r["chunk_id"],
+                "chunk_level": r.get("chunk_level", "leaf"),
+            }
+            for r in filtered[:k_limit]
+        ]
+
+    bm25 = BM25Okapi(tokenized)
+    scores = bm25.get_scores(q_tokens)
+    ranked = sorted(
+        zip(scores, filtered), key=lambda x: x[0], reverse=True
+    )[:k_limit]
+    return [
+        {
+            "chunk_text": r["chunk_text"],
+            "ticker": r["ticker"],
+            "year": r["year"],
+            "section": r["section"],
+            "chunk_id": r["chunk_id"],
+            "chunk_level": r.get("chunk_level", "leaf"),
+        }
+        for _, r in ranked
+    ]
 
 
 def search_filings(
@@ -408,12 +895,77 @@ def search_filings(
     k: int | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Performs a Hybrid RAG search (Dense Embeddings + BM25 Lexical Search with RRF fusion)
-    over the SEC filings ChromaDB collection, including RAPTOR-lite section summaries.
+    Performs a Hybrid RAG search (Dense Embeddings + Lexical Search with RRF fusion) over:
+    1. Cloud Postgres (pgvector + tsvector) with Gemini Embedding 2 when configured
+    2. Local ChromaDB + SentenceTransformers + BM25 in local dev
+    3. Bundled chunks.jsonl BM25 fallback in zero-DB environments.
     """
     try:
-        collection = get_collection()
         clean_ticker = str(ticker).upper().strip() if ticker else None
+        k_limit = int(k) if k is not None else SEARCH_RESULTS_LIMIT
+        lf = get_langfuse()
+
+        # 1. Cloud Vector Mode: Gemini Embedding 2 + Postgres (pgvector + tsvector RRF)
+        if is_cloud_vector_enabled():
+            if clean_ticker and clean_ticker not in _auto_ingested_tickers:
+                if not has_ticker_chunks_pg(clean_ticker):
+                    _auto_ingested_tickers.add(clean_ticker)
+                    try:
+                        existing_local = _load_chunks_from_jsonl(
+                            ticker_filter=clean_ticker
+                        )
+                        if not existing_local:
+                            ingest_company(
+                                ticker=clean_ticker,
+                                years=_default_auto_ingest_years(year),
+                            )
+                        build_index(ticker_filter=clean_ticker)
+                    except Exception as auto_err:
+                        print(
+                            f"Cloud auto-ingestion skipped for {clean_ticker}: {auto_err}"
+                        )
+
+            active_emb_model = get_active_embedding_model_name()
+            with obs_context(
+                lf,
+                as_type="embedding",
+                name="embed-search-query-gemini",
+                model=active_emb_model,
+                input={"query": query},
+                metadata={"provider": "google-gemini"},
+            ) as emb_obs:
+                q_vec = embed_query_cloud(query)
+                if emb_obs is not None:
+                    try:
+                        emb_obs.update(
+                            output={
+                                "dimensions": len(q_vec),
+                                "vector_preview": [round(v, 5) for v in q_vec[:5]],
+                            },
+                            usage_details={"input": len(_tokenize(query))},
+                        )
+                    except Exception:
+                        pass
+
+            pg_hits = hybrid_search_pg(
+                query=query,
+                query_vec=q_vec,
+                ticker=clean_ticker,
+                year=year,
+                section=section,
+                k_limit=k_limit,
+            )
+            if pg_hits:
+                return pg_hits
+
+        # 2. Zero-DB Serverless Fallback if local ChromaDB is not installed
+        if not is_local_chroma_available():
+            return _bm25_jsonl_fallback(
+                query, clean_ticker, year, section, k_limit
+            )
+
+        # 3. Local Dev Mode: ChromaDB + SentenceTransformers + BM25 RRF
+        collection = get_collection()
 
         # On-demand auto-ingestion if a requested ticker has 0 indexed chunks in ChromaDB
         if clean_ticker and clean_ticker not in _auto_ingested_tickers:
@@ -423,11 +975,10 @@ def search_filings(
             if not (existing_for_ticker and existing_for_ticker.get("ids")):
                 _auto_ingested_tickers.add(clean_ticker)
                 try:
-                    target_yr = int(str(year).strip()) if year else None
-                    yrs_to_ingest = (
-                        [target_yr] if target_yr else [2023, 2024, 2025]
+                    ingest_company(
+                        ticker=clean_ticker,
+                        years=_default_auto_ingest_years(year),
                     )
-                    ingest_company(ticker=clean_ticker, years=yrs_to_ingest)
                     build_index(ticker_filter=clean_ticker)
                 except Exception as auto_err:
                     print(
@@ -799,165 +1350,11 @@ def get_market_sentiment(
     limit: int = 6,
 ) -> list[dict[str, Any]]:
     """
-    Fetches public market sentiment, retail investor discussions from Reddit
-    (r/stocks, r/investing, r/wallstreetbets), and recent financial news headlines
-    from Yahoo Finance for a given company ticker.
+    Fetches fresh 24h-7d financial news (Google News RSS, Finnhub, Yahoo Finance) and
+    recent investor discussions from Reddit (r/stocks, r/investing, r/wallstreetbets,
+    r/SecurityAnalysis) ranked by BM25 relevance and recency.
     """
-    clean_ticker = ticker.upper().strip()
-    search_term = f"{clean_ticker} {query}".strip() if query else clean_ticker
-    headers = {
-        "User-Agent": "python:companyscope:v0.2.0 (by /u/companyscope_research)"
-    }
-    items: list[dict[str, Any]] = []
-    current_year = datetime.datetime.now(datetime.timezone.utc).year
-
-    # 1. Reddit public JSON API across r/stocks, r/investing, r/wallstreetbets
-    try:
-        reddit_url = (
-            "https://www.reddit.com/r/stocks+investing+wallstreetbets/search.json"
-        )
-        r_red = requests.get(
-            reddit_url,
-            params={
-                "q": search_term,
-                "restrict_sr": "on",
-                "sort": "relevance",
-                "t": "year",
-                "limit": str(max(limit, 6)),
-            },
-            headers=headers,
-            timeout=8,
-        )
-        if r_red.ok:
-            children = ((r_red.json() or {}).get("data") or {}).get("children") or []
-            for idx, child in enumerate(children):
-                post = (child or {}).get("data") or {}
-                title = " ".join(str(post.get("title") or "").split())
-                selftext = " ".join(str(post.get("selftext") or "").split())
-                if not title:
-                    continue
-                subreddit = str(post.get("subreddit_name_prefixed") or "r/stocks")
-                score = int(post.get("score") or 0)
-                num_comments = int(post.get("num_comments") or 0)
-                created_utc = post.get("created_utc")
-                post_year = (
-                    datetime.datetime.fromtimestamp(
-                        float(created_utc), tz=datetime.timezone.utc
-                    ).year
-                    if created_utc
-                    else current_year
-                )
-                post_id = str(post.get("id") or idx)
-                permalink = str(post.get("permalink") or "")
-                post_url = (
-                    f"https://www.reddit.com{permalink}" if permalink else ""
-                )
-
-                snippet = selftext[:450] if selftext else title
-                chunk_text = (
-                    f"[{subreddit} | Score: {score} | Comments: {num_comments}] "
-                    f"Title: {title}. Post: {snippet}"
-                )
-                items.append(
-                    {
-                        "chunk_id": f"{clean_ticker}_{post_year}_REDDIT_{post_id}",
-                        "chunk_text": chunk_text,
-                        "ticker": clean_ticker,
-                        "year": post_year,
-                        "section": f"Reddit ({subreddit})",
-                        "source_type": "social_sentiment",
-                        "url": post_url,
-                    }
-                )
-                if len(items) >= (limit // 2) + 1:
-                    break
-    except Exception:
-        pass
-
-    # 2. Yahoo Finance Search News JSON API
-    try:
-        yf_search_url = "https://query2.finance.yahoo.com/v1/finance/search"
-        r_yf = requests.get(
-            yf_search_url,
-            params={"q": search_term, "newsCount": str(limit), "quotesCount": "0"},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=8,
-        )
-        if r_yf.ok:
-            news_list = (r_yf.json() or {}).get("news") or []
-            for idx, article in enumerate(news_list):
-                title = " ".join(str(article.get("title") or "").split())
-                if not title:
-                    continue
-                publisher = str(article.get("publisher") or "Yahoo Finance")
-                link = str(article.get("link") or "")
-                pub_time = article.get("providerPublishTime")
-                art_year = (
-                    datetime.datetime.fromtimestamp(
-                        float(pub_time), tz=datetime.timezone.utc
-                    ).year
-                    if pub_time
-                    else current_year
-                )
-                uuid_short = str(article.get("uuid") or idx)[:8]
-                chunk_text = f"[News: {publisher}] Headline: {title}"
-                items.append(
-                    {
-                        "chunk_id": f"{clean_ticker}_{art_year}_NEWS_{uuid_short}",
-                        "chunk_text": chunk_text,
-                        "ticker": clean_ticker,
-                        "year": art_year,
-                        "section": f"News ({publisher})",
-                        "source_type": "financial_news",
-                        "url": link,
-                    }
-                )
-                if len(items) >= limit:
-                    break
-    except Exception:
-        pass
-
-    # 3. Yahoo Finance RSS Feed fallback if needed
-    if len(items) < limit:
-        try:
-            rss_url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={clean_ticker}&region=US&lang=en-US"
-            r_rss = requests.get(
-                rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8
-            )
-            if r_rss.ok and r_rss.text:
-                root = ET.fromstring(r_rss.text)
-                for idx, item_el in enumerate(root.findall(".//item")):
-                    title = " ".join(
-                        (item_el.findtext("title") or "").split()
-                    )
-                    desc = " ".join(
-                        (item_el.findtext("description") or "").split()
-                    )
-                    link = (item_el.findtext("link") or "").strip()
-                    if not title:
-                        continue
-                    chunk_text = (
-                        f"[Yahoo Finance RSS] Headline: {title}. Summary: {desc[:350]}"
-                        if desc
-                        else f"[Yahoo Finance RSS] Headline: {title}"
-                    )
-                    items.append(
-                        {
-                            "chunk_id": f"{clean_ticker}_{current_year}_YFRSS_{idx}",
-                            "chunk_text": chunk_text,
-                            "ticker": clean_ticker,
-                            "year": current_year,
-                            "section": "Yahoo Finance News",
-                            "source_type": "financial_news",
-                            "url": link,
-                        }
-                    )
-                    if len(items) >= limit:
-                        break
-        except Exception:
-            pass
-
-    return items[:limit]
+    return fetch_fresh_news_and_sentiment(ticker=ticker, query=query, limit=limit)
 
 
 def calculator(expression: str) -> float:
