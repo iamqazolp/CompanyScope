@@ -1,30 +1,36 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   ArrowUpRight,
   Bot,
   Check,
+  ChevronDown,
+  ChevronUp,
   Clock,
   Cpu,
   ExternalLink,
+  FileCheck2,
   Layers,
   Loader2,
+  Search,
   Send,
   Share2,
-  ShieldCheck,
-  Sparkles,
+  X,
   Zap,
 } from "lucide-react";
 import type {
   Citation,
   FinancialRow,
+  LiveQuote,
+  MarketRecapResponse,
   QueryResult,
   QuotaStatus,
   SavedReport,
   ShowcaseSummary,
   StreamStep,
+  TickerSearchResult,
 } from "@/lib/types";
 import { citationBadgeLabel, formatResetCountdown } from "@/lib/format";
 import { MarketRecapBar } from "./MarketRecapBar";
@@ -32,37 +38,14 @@ import { MarkdownView } from "./MarkdownView";
 import { SourceInspector } from "./SourceInspector";
 import { TradingViewChart } from "./TradingViewChart";
 
-const POPULAR_TICKERS = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"];
-
-const QUICK_PROMPTS = [
-  {
-    label: "📈 Live Valuation vs. FCF & Insiders",
-    ticker: "AAPL",
-    peers: "",
-    mode: "multi_agent",
-    q: "Compare Apple's live Market Cap, Forward P/E, and recent SEC Form 4 insider trades against its FY2025 XBRL Free Cash Flow and Item 1A risks.",
-  },
-  {
-    label: "AAPL vs. MSFT Peer Compare",
-    ticker: "AAPL",
-    peers: "MSFT",
-    mode: "multi_agent",
-    q: "Compare revenue scale, profitability, and primary AI and cloud risk disclosures between Apple and Microsoft.",
-  },
-  {
-    label: "⚡ Multi-Year CAGR & Forensic Escalation",
-    ticker: "AAPL",
-    peers: "",
-    mode: "multi_agent",
-    q: "Calculate Apple's 3-year revenue CAGR from 2022 to 2025, analyze gross margin expansion, and reconcile any contradictions between 8-K commentary and 10-K antitrust/tariff risks.",
-  },
-  {
-    label: "8-K Earnings & Street Pulse",
-    ticker: "AAPL",
-    peers: "",
-    mode: "multi_agent",
-    q: "Summarize Apple's 2025 8-K earnings release highlights alongside current Reddit investor sentiment and Yahoo Finance news headlines.",
-  },
+const DEFAULT_FALLBACK_MOVERS: TickerSearchResult[] = [
+  { ticker: "NVDA", company_name: "NVIDIA Corp." },
+  { ticker: "MSFT", company_name: "Microsoft Corp." },
+  { ticker: "JPM", company_name: "JPMorgan Chase" },
+  { ticker: "LLY", company_name: "Eli Lilly & Co." },
+  { ticker: "AMZN", company_name: "Amazon.com Inc." },
+  { ticker: "PLTR", company_name: "Palantir Tech." },
+  { ticker: "COST", company_name: "Costco Wholesale" },
 ];
 
 interface Props {
@@ -70,9 +53,22 @@ interface Props {
 }
 
 export function ResearchTerminal({ initialReport = null }: Props) {
-  const [ticker, setTicker] = useState<string>(
-    initialReport?.tickers?.[0] || "AAPL"
+  const initialTicker = initialReport?.tickers?.[0] || "NVDA";
+  const [ticker, setTicker] = useState<string>(initialTicker);
+  const [activeQuote, setActiveQuote] = useState<LiveQuote | null>(null);
+
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [searchOpen, setSearchOpen] = useState<boolean>(false);
+  const [searchLoading, setSearchLoading] = useState<boolean>(false);
+  const [searchResults, setSearchResults] = useState<TickerSearchResult[]>([]);
+  const [highlightIdx, setHighlightIdx] = useState<number>(0);
+  const searchBoxRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [movers, setMovers] = useState<TickerSearchResult[]>(
+    DEFAULT_FALLBACK_MOVERS
   );
+
   const [peerInput, setPeerInput] = useState<string>(
     initialReport?.tickers && initialReport.tickers.length > 1
       ? initialReport.tickers.slice(1).join(", ")
@@ -94,16 +90,19 @@ export function ResearchTerminal({ initialReport = null }: Props) {
   const [engineInfo, setEngineInfo] = useState<{
     tier1Model: string;
     tier2Model: string;
-    embedding: string;
-    backend: string;
   }>({
     tier1Model: "gpt-6.1-terra",
     tier2Model: "gpt-6-luna",
-    embedding: "gemini-embedding-2",
-    backend: "pgvector",
   });
 
+  const [recap, setRecap] = useState<MarketRecapResponse | null>(null);
+  const [recapLoading, setRecapLoading] = useState<boolean>(true);
+  const [recapRefreshing, setRecapRefreshing] = useState<boolean>(false);
+
   const [showcases, setShowcases] = useState<ShowcaseSummary[]>([]);
+  const [samplesMenuOpen, setSamplesMenuOpen] = useState<boolean>(false);
+  const samplesRef = useRef<HTMLDivElement | null>(null);
+
   const [activeSlug, setActiveSlug] = useState<string | null>(
     initialReport?.slug || null
   );
@@ -119,12 +118,19 @@ export function ResearchTerminal({ initialReport = null }: Props) {
   const [activeTab, setActiveTab] = useState<"synthesis" | "specialists">(
     "synthesis"
   );
+  const [rightTab, setRightTab] = useState<"sources" | "brief">(
+    initialReport?.result?.citations?.length ? "sources" : "brief"
+  );
 
   const [financials, setFinancials] = useState<FinancialRow[]>([]);
+  const [quarterlyFinancials, setQuarterlyFinancials] = useState<
+    FinancialRow[]
+  >([]);
   const [finLoading, setFinLoading] = useState<boolean>(false);
 
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
   const [steps, setSteps] = useState<StreamStep[]>([]);
+  const [traceExpanded, setTraceExpanded] = useState<boolean>(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [copiedLink, setCopiedLink] = useState<boolean>(false);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState<boolean>(false);
@@ -132,23 +138,73 @@ export function ResearchTerminal({ initialReport = null }: Props) {
     Citation[] | null
   >(null);
 
-  // Initial bootstrap: health, quota, showcase list, and default showcase if empty
+  const selectTicker = useCallback(
+    (sym: string, preservePeers = false) => {
+      const clean = sym.trim().toUpperCase().replace(".", "-");
+      if (!clean || clean.length > 6) return;
+      setTicker(clean);
+      setSearchQuery("");
+      setSearchOpen(false);
+      if (!preservePeers) {
+        setPeerInput("");
+      }
+      if (typeof window !== "undefined") {
+        try {
+          window.sessionStorage.setItem("cs_active_ticker", clean);
+        } catch {
+          // Ignore private-mode storage errors
+        }
+      }
+    },
+    []
+  );
+
+  const fetchRecap = useCallback(async (force = false) => {
+    if (force) setRecapRefreshing(true);
+    try {
+      const url = force ? "/api/market/recap?force=true" : "/api/market/recap";
+      const r = await fetch(url);
+      if (r.ok) {
+        const data: MarketRecapResponse = await r.json();
+        if (!data.error) setRecap(data);
+      }
+    } catch {
+      // Ignore transient offline errors
+    } finally {
+      setRecapLoading(false);
+      setRecapRefreshing(false);
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
+    fetchRecap(false);
+
+    let savedTicker: string | null = null;
+    if (!initialReport && typeof window !== "undefined") {
+      try {
+        savedTicker = window.sessionStorage.getItem("cs_active_ticker");
+        if (savedTicker) {
+          setTicker(savedTicker.toUpperCase());
+        }
+      } catch {
+        // Ignore storage errors
+      }
+    }
+
     async function init() {
       try {
-        const [hRes, qRes, sRes] = await Promise.all([
+        const [hRes, qRes, sRes, mRes] = await Promise.all([
           fetch("/api/health"),
           fetch("/api/quota"),
           fetch("/api/showcase"),
+          fetch("/api/market/movers?limit=7"),
         ]);
         if (!cancelled && hRes.ok) {
           const h = await hRes.json();
           setEngineInfo({
             tier1Model: h.tier1_model || h.model || "gpt-6.1-terra",
             tier2Model: h.tier2_model || "gpt-6-luna",
-            embedding: h.embedding_model || "gemini-embedding-2",
-            backend: h.vector_backend || "pgvector",
           });
         }
         if (!cancelled && qRes.ok) {
@@ -157,31 +213,91 @@ export function ResearchTerminal({ initialReport = null }: Props) {
         }
         if (!cancelled && sRes.ok) {
           const s = await sRes.json();
-          const list: ShowcaseSummary[] = s.reports || [];
-          setShowcases(list);
-          // Auto-load first verified showcase on fresh visit so terminal feels alive immediately
-          if (!initialReport && list.length > 0) {
-            const firstRes = await fetch(`/api/reports/${list[0].slug}`);
-            if (!cancelled && firstRes.ok) {
-              const rep: SavedReport = await firstRes.json();
-              setActiveSlug(rep.slug);
-              setActiveQuestion(rep.question);
-              setResult(rep.result);
-              setSelectedCitIdx(rep.result.citations?.length ? 0 : null);
+          setShowcases(s.reports || []);
+        }
+        if (!cancelled && mRes.ok) {
+          const m = await mRes.json();
+          if (Array.isArray(m.movers) && m.movers.length > 0) {
+            setMovers(m.movers);
+            if (!initialReport && !savedTicker && m.movers[0]?.ticker) {
+              setTicker(m.movers[0].ticker);
             }
           }
         }
       } catch {
-        // Ignore transient offline errors during local boot
+        // Ignore boot network errors
       }
     }
     init();
     return () => {
       cancelled = true;
     };
-  }, [initialReport]);
+  }, [fetchRecap, initialReport]);
 
-  // Fetch multi-year XBRL financials when primary ticker changes
+  // Global Cmd+K / Ctrl+K shortcut + outside click handlers
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchOpen(true);
+        searchInputRef.current?.focus();
+      }
+    }
+    function onDocMouseDown(e: MouseEvent) {
+      const target = e.target as Node;
+      if (searchBoxRef.current && !searchBoxRef.current.contains(target)) {
+        setSearchOpen(false);
+      }
+      if (samplesRef.current && !samplesRef.current.contains(target)) {
+        setSamplesMenuOpen(false);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("mousedown", onDocMouseDown);
+    };
+  }, []);
+
+  // Debounced live autocomplete across 6,000+ US equities
+  useEffect(() => {
+    if (!searchOpen) return;
+    const q = searchQuery.trim();
+    if (!q) {
+      setSearchResults(movers);
+      setHighlightIdx(0);
+      setSearchLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setSearchLoading(true);
+    const timer = window.setTimeout(async () => {
+      try {
+        const r = await fetch(
+          `/api/market/search?q=${encodeURIComponent(q)}&limit=8`
+        );
+        if (!cancelled && r.ok) {
+          const data = await r.json();
+          if (Array.isArray(data.results)) {
+            setSearchResults(data.results);
+            setHighlightIdx(0);
+          }
+        }
+      } catch {
+        // Ignore transient search errors
+      } finally {
+        if (!cancelled) setSearchLoading(false);
+      }
+    }, 150);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [searchQuery, searchOpen, movers]);
+
   useEffect(() => {
     const clean = ticker.trim().toUpperCase();
     if (!clean || clean.length > 6) return;
@@ -192,6 +308,12 @@ export function ResearchTerminal({ initialReport = null }: Props) {
       .then((data) => {
         if (!cancelled && data && Array.isArray(data.financials)) {
           setFinancials(data.financials);
+          setQuarterlyFinancials(
+            Array.isArray(data.quarterly) ? data.quarterly : []
+          );
+        } else if (!cancelled) {
+          setFinancials([]);
+          setQuarterlyFinancials([]);
         }
       })
       .catch(() => {})
@@ -203,25 +325,32 @@ export function ResearchTerminal({ initialReport = null }: Props) {
     };
   }, [ticker]);
 
-  const loadShowcase = useCallback(async (slug: string) => {
-    setErrorBanner(null);
-    try {
-      const r = await fetch(`/api/reports/${encodeURIComponent(slug)}`);
-      if (!r.ok) return;
-      const rep: SavedReport = await r.json();
-      if (rep.tickers?.[0]) setTicker(rep.tickers[0]);
-      setPeerInput(rep.tickers?.length > 1 ? rep.tickers.slice(1).join(", ") : "");
-      setActiveSlug(rep.slug);
-      setActiveQuestion(rep.question);
-      setResult(rep.result);
-      setInspectorOverride(null);
-      setSteps([]);
-      setActiveTab("synthesis");
-      setSelectedCitIdx(rep.result.citations?.length ? 0 : null);
-    } catch {
-      setErrorBanner("Failed to load showcase report.");
-    }
-  }, []);
+  const loadShowcase = useCallback(
+    async (slug: string) => {
+      setErrorBanner(null);
+      setSamplesMenuOpen(false);
+      try {
+        const r = await fetch(`/api/reports/${encodeURIComponent(slug)}`);
+        if (!r.ok) return;
+        const rep: SavedReport = await r.json();
+        if (rep.tickers?.[0]) selectTicker(rep.tickers[0], true);
+        setPeerInput(
+          rep.tickers?.length > 1 ? rep.tickers.slice(1).join(", ") : ""
+        );
+        setActiveSlug(rep.slug);
+        setActiveQuestion(rep.question);
+        setResult(rep.result);
+        setInspectorOverride(null);
+        setSteps([]);
+        setActiveTab("synthesis");
+        setSelectedCitIdx(rep.result.citations?.length ? 0 : null);
+        if (rep.result.citations?.length) setRightTab("sources");
+      } catch {
+        setErrorBanner("Failed to load report.");
+      }
+    },
+    [selectTicker]
+  );
 
   const runLiveQuery = useCallback(
     async (override?: {
@@ -231,9 +360,8 @@ export function ResearchTerminal({ initialReport = null }: Props) {
       m: "multi_agent" | "auto" | "single";
     }) => {
       const qText = (override ? override.q : question).trim();
-      const primaryTkr = (override ? override.tkr : ticker)
-        .trim()
-        .toUpperCase() || "AAPL";
+      const primaryTkr =
+        (override ? override.tkr : ticker).trim().toUpperCase() || "NVDA";
       const peersRaw = override ? override.peers : peerInput;
       const activeMode = override ? override.m : mode;
 
@@ -250,6 +378,7 @@ export function ResearchTerminal({ initialReport = null }: Props) {
 
       setErrorBanner(null);
       setIsStreaming(true);
+      setTraceExpanded(true);
       setActiveQuestion(qText);
       setActiveSlug(null);
       setResult(null);
@@ -261,7 +390,7 @@ export function ResearchTerminal({ initialReport = null }: Props) {
           id: "dispatch",
           timestamp: Date.now(),
           type: "plan",
-          label: `Dispatching ${activeMode === "single" ? "Single-Agent" : "Multi-Agent Supervisor"} across ${allTickers.join(", ")}`,
+          label: `${activeMode === "single" ? "Single" : "Supervisor"} → ${allTickers.join(", ")}`,
         },
       ]);
 
@@ -272,7 +401,7 @@ export function ResearchTerminal({ initialReport = null }: Props) {
           body: JSON.stringify({
             question: qText,
             ticker: primaryTkr,
-            tickers: allTickers.length > 1 ? allTickers : undefined,
+            tickers: peerList.length > 0 ? allTickers : undefined,
             mode: activeMode,
           }),
         });
@@ -281,8 +410,7 @@ export function ResearchTerminal({ initialReport = null }: Props) {
           const errJson = await resp.json().catch(() => ({}));
           if (errJson.quota) setQuota(errJson.quota);
           setErrorBanner(
-            errJson.error ||
-              "Daily 5-query guest limit reached. Explore Showcase Reports above or return after 00:00 UTC."
+            errJson.error || "Daily 5-query limit reached. Resets at 00:00 UTC."
           );
           setIsStreaming(false);
           return;
@@ -317,16 +445,26 @@ export function ResearchTerminal({ initialReport = null }: Props) {
               if (ev.type === "quota" && ev.quota) {
                 setQuota(ev.quota);
               } else if (ev.type === "plan") {
+                if (
+                  Array.isArray(ev.tickers) &&
+                  ev.tickers[0] &&
+                  ev.tickers[0] !== primaryTkr
+                ) {
+                  selectTicker(ev.tickers[0], ev.tickers.length > 1);
+                  if (ev.tickers.length > 1) {
+                    setPeerInput(ev.tickers.slice(1).join(", "));
+                  }
+                }
                 const planLabel =
                   ev.mode === "single"
-                    ? `Single-Agent routed to ${ev.model || engineInfo.tier2Model}${
-                        ev.escalated ? " (⚡ Demanding Task Escalation)" : ""
-                      } for ${(ev.tickers || []).join(", ")}`
-                    : `Tier-1 Supervisor (${
-                        ev.supervisor_model || engineInfo.tier1Model
-                      }) dispatched [${(ev.specialists || [])
+                    ? `${ev.model || engineInfo.tier2Model}${
+                        ev.escalated ? " ⚡" : ""
+                      } → ${(ev.tickers || []).join(", ")}`
+                    : `${ev.supervisor_model || engineInfo.tier1Model} → [${(
+                        ev.tickers || []
+                      ).join(", ")}] · ${(ev.specialists || [])
                         .join(", ")
-                        .toUpperCase()}] across ${(ev.tickers || []).join(", ")}`;
+                        .toUpperCase()}`;
                 setSteps((prev) => [
                   ...prev,
                   {
@@ -339,11 +477,6 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                   },
                 ]);
               } else if (ev.type === "specialist_start") {
-                const tierTag = ev.escalated
-                  ? `⚡ Tier-1 Escalated (${ev.model})`
-                  : `${ev.tier === "tier1" ? "Tier-1" : "Tier-2"} (${
-                      ev.model || engineInfo.tier2Model
-                    })`;
                 setSteps((prev) => [
                   ...prev,
                   {
@@ -354,7 +487,9 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                     ticker: ev.ticker,
                     model: ev.model,
                     escalated: Boolean(ev.escalated),
-                    label: `${ev.agent} specialist started on ${tierTag}`,
+                    label: `${ev.agent} (${ev.model || engineInfo.tier2Model}${
+                      ev.escalated ? " ⚡" : ""
+                    })`,
                   },
                 ]);
               } else if (ev.type === "tier_escalation") {
@@ -368,15 +503,13 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                     ticker: ev.ticker,
                     model: ev.to_model,
                     escalated: true,
-                    label: `⚡ ${ev.agent} escalated ${ev.from_model} → ${ev.to_model} (${String(
-                      ev.reason || "demanding_retry"
-                    ).replace(/_/g, " ")})`,
+                    label: `⚡ ${ev.agent}: ${ev.from_model} → ${ev.to_model}`,
                   },
                 ]);
               } else if (ev.type === "tool_call") {
                 const argPreview = ev.args
                   ? Object.entries(ev.args)
-                      .map(([k, v]) => `${k}=${String(v).slice(0, 28)}`)
+                      .map(([k, v]) => `${k}=${String(v).slice(0, 22)}`)
                       .join(", ")
                   : "";
                 setSteps((prev) => [
@@ -387,7 +520,7 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                     type: "tool_call",
                     role: ev.role,
                     ticker: ev.ticker,
-                    label: `${ev.agent || ev.ticker} → ${ev.tool}(${argPreview})`,
+                    label: `${ev.agent || ev.ticker} · ${ev.tool}(${argPreview})`,
                   },
                 ]);
               } else if (ev.type === "specialist_done") {
@@ -399,7 +532,7 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                     type: "specialist_done",
                     role: ev.role,
                     ticker: ev.ticker,
-                    label: `${ev.agent} verified ${ev.citations_count} citation(s)`,
+                    label: `${ev.agent} ✓ (${ev.citations_count} citations)`,
                   },
                 ]);
               } else if (ev.type === "synthesizing") {
@@ -410,9 +543,7 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                     timestamp: Date.now(),
                     type: "synthesizing",
                     model: ev.model,
-                    label: `Tier-1 Lead Synthesizer (${
-                      ev.model || engineInfo.tier1Model
-                    }) merging ${ev.reports_count} verified specialist reports...`,
+                    label: `Synthesizing (${ev.model || engineInfo.tier1Model})...`,
                   },
                 ]);
               } else if (ev.type === "guard_check") {
@@ -422,7 +553,7 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                     id: `guard-${Date.now()}`,
                     timestamp: Date.now(),
                     type: "guard_check",
-                    label: `Citation Guard checked ${ev.valid_count} valid / ${ev.invalid_count} invalid claims`,
+                    label: `Guard: ${ev.valid_count} valid / ${ev.invalid_count} rejected`,
                   },
                 ]);
               } else if (ev.type === "result") {
@@ -432,8 +563,10 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                   setErrorBanner(payload.error);
                 } else {
                   setResult(payload);
+                  setTraceExpanded(false);
                   setActiveSlug(ev.report_slug || payload.report_slug || null);
                   setSelectedCitIdx(payload.citations?.length ? 0 : null);
+                  if (payload.citations?.length) setRightTab("sources");
                 }
               } else if (ev.type === "error") {
                 setErrorBanner(ev.error || "Execution error");
@@ -445,15 +578,13 @@ export function ResearchTerminal({ initialReport = null }: Props) {
         }
       } catch (err) {
         setErrorBanner(
-          err instanceof Error
-            ? err.message
-            : "Failed to connect to CompanyScope API."
+          err instanceof Error ? err.message : "Connection failed."
         );
       } finally {
         setIsStreaming(false);
       }
     },
-    [question, ticker, peerInput, mode, isStreaming]
+    [question, ticker, peerInput, mode, isStreaming, engineInfo, selectTicker]
   );
 
   const handleCopyPermalink = useCallback(() => {
@@ -461,9 +592,42 @@ export function ResearchTerminal({ initialReport = null }: Props) {
     const url = `${window.location.origin}/report/${activeSlug}`;
     navigator.clipboard.writeText(url).then(() => {
       setCopiedLink(true);
-      setTimeout(() => setCopiedLink(false), 2200);
+      setTimeout(() => setCopiedLink(false), 2000);
     });
   }, [activeSlug]);
+
+  const suggestedPeers =
+    activeQuote?.ticker === ticker && activeQuote?.suggested_peers?.length
+      ? activeQuote.suggested_peers
+      : ["NVDA", "MSFT", "JPM"].filter((s) => s !== ticker);
+  const topPeer = suggestedPeers[0] || "MSFT";
+
+  const quickActions = [
+    {
+      label: "Valuation & Insiders",
+      peers: "",
+      mode: "multi_agent" as const,
+      query: `Compare ${ticker}'s live Market Cap, Forward P/E, and recent SEC Form 4 insider trades against its latest XBRL Free Cash Flow and Item 1A risks.`,
+    },
+    {
+      label: `vs ${topPeer}`,
+      peers: topPeer,
+      mode: "multi_agent" as const,
+      query: `Compare latest annual Revenue, profitability, live valuation multiples, and primary 10-K risk disclosures between ${ticker} and ${topPeer}.`,
+    },
+    {
+      label: "Multi-Year Growth",
+      peers: "",
+      mode: "multi_agent" as const,
+      query: `Calculate ${ticker}'s multi-year revenue growth, analyze margin expansion, and reconcile management commentary against 10-K risk factors.`,
+    },
+    {
+      label: "8-K & Live News",
+      peers: "",
+      mode: "multi_agent" as const,
+      query: `Summarize ${ticker}'s latest Form 8-K events alongside fresh 7-day news headlines and Reddit investor sentiment.`,
+    },
+  ];
 
   const reportCitations = result?.citations || [];
   const inspectorCitations = inspectorOverride || reportCitations;
@@ -473,52 +637,215 @@ export function ResearchTerminal({ initialReport = null }: Props) {
       : inspectorCitations[0] || null;
 
   return (
-    <div className="min-h-screen flex flex-col">
-      {/* Top Institutional Navigation Bar */}
-      <header className="sticky top-0 z-30 border-b border-slate-800/80 bg-[#080c14]/90 backdrop-blur-md">
-        <div className="mx-auto max-w-[1520px] px-4 sm:px-6 h-14 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <a href="/" className="flex items-center gap-2.5 group">
-              <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-emerald-500/25 to-blue-600/25 border border-emerald-400/40 flex items-center justify-center text-emerald-300 font-mono font-bold text-sm">
+    <div className="min-h-screen flex flex-col bg-[#060911]">
+      {/* Slim Functional Header: Universal Ticker/Company Search + Live Market Movers */}
+      <header className="sticky top-0 z-30 border-b border-slate-800/80 bg-[#070b14]/95 backdrop-blur-md">
+        <div className="mx-auto max-w-[1520px] px-4 sm:px-6 h-12 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0 flex-1">
+            <a href="/" className="flex items-center gap-2 shrink-0">
+              <div className="h-7 w-7 rounded-md bg-emerald-500/15 border border-emerald-400/40 flex items-center justify-center text-emerald-300 font-mono font-bold text-xs">
                 CS
               </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-semibold tracking-tight text-slate-100 text-sm">
-                    CompanyScope
-                  </span>
-                  <span className="hidden sm:inline-flex items-center gap-1 rounded-full bg-emerald-500/10 border border-emerald-500/25 px-2 py-0.5 text-[10px] font-medium text-emerald-300">
-                    <ShieldCheck className="h-3 w-3" />
-                    Zero-Hallucination SEC Analyst
-                  </span>
-                </div>
-                <p className="hidden md:block text-[10.5px] text-slate-500 font-mono">
-                  Tier 1: {engineInfo.tier1Model} · Sub-Agents:{" "}
-                  {engineInfo.tier2Model} · {engineInfo.embedding} ·{" "}
-                  {engineInfo.backend}
-                </p>
-              </div>
+              <span className="font-semibold tracking-tight text-slate-100 text-sm hidden sm:inline">
+                CompanyScope
+              </span>
             </a>
+
+            <div className="h-4 w-px bg-slate-800 hidden sm:block shrink-0" />
+
+            {/* All-Market Company & Ticker Search Combobox */}
+            <div ref={searchBoxRef} className="relative shrink-0">
+              <div className="relative flex items-center">
+                <Search className="h-3.5 w-3.5 text-slate-500 absolute left-2.5 pointer-events-none" />
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  value={searchOpen ? searchQuery : ""}
+                  onFocus={() => {
+                    setSearchOpen(true);
+                    setSearchQuery("");
+                  }}
+                  onChange={(e) => {
+                    setSearchOpen(true);
+                    setSearchQuery(e.target.value);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setHighlightIdx((i) =>
+                        Math.min(i + 1, Math.max(0, searchResults.length - 1))
+                      );
+                    } else if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setHighlightIdx((i) => Math.max(0, i - 1));
+                    } else if (e.key === "Enter") {
+                      e.preventDefault();
+                      const picked = searchResults[highlightIdx];
+                      if (picked?.ticker) {
+                        selectTicker(picked.ticker);
+                        searchInputRef.current?.blur();
+                      } else if (searchQuery.trim()) {
+                        selectTicker(searchQuery.trim());
+                        searchInputRef.current?.blur();
+                      }
+                    } else if (e.key === "Escape") {
+                      setSearchOpen(false);
+                      searchInputRef.current?.blur();
+                    }
+                  }}
+                  placeholder={`${ticker} · Search any US stock`}
+                  aria-label="Search any US ticker or company name"
+                  className="w-44 sm:w-56 rounded-md border border-slate-800 bg-[#0b111e] pl-8 pr-11 py-1 text-xs text-slate-100 placeholder:text-slate-300 placeholder:font-mono focus:placeholder:text-slate-500 focus:border-emerald-500/60 focus:outline-none transition"
+                />
+                {searchLoading ? (
+                  <Loader2 className="h-3 w-3 animate-spin text-slate-500 absolute right-2.5" />
+                ) : (
+                  <kbd className="hidden sm:inline-block absolute right-2 rounded border border-slate-800 bg-[#070b14] px-1 py-0.2 font-mono text-[9.5px] text-slate-500 pointer-events-none">
+                    ⌘K
+                  </kbd>
+                )}
+              </div>
+
+              {/* Autocomplete Results Popover */}
+              {searchOpen && (
+                <div className="absolute left-0 mt-1.5 w-80 sm:w-96 rounded-lg border border-slate-700/90 bg-[#0b111e] shadow-2xl overflow-hidden z-50">
+                  <div className="px-3 py-1.5 border-b border-slate-800/80 flex items-center justify-between text-[10px] font-mono text-slate-500">
+                    <span>
+                      {searchQuery.trim()
+                        ? "NASDAQ · NYSE · AMEX MATCHES"
+                        : "TODAY'S MOST ACTIVE US EQUITIES"}
+                    </span>
+                    <span>ESC</span>
+                  </div>
+
+                  {searchResults.length === 0 && !searchLoading ? (
+                    <div className="px-3 py-4 text-xs text-slate-500 text-center">
+                      Press Enter to jump directly to{" "}
+                      <strong className="font-mono text-slate-200">
+                        {searchQuery.trim().toUpperCase()}
+                      </strong>
+                    </div>
+                  ) : (
+                    <div className="max-h-72 overflow-y-auto divide-y divide-slate-800/50">
+                      {searchResults.map((item, idx) => {
+                        const up = (item.change_pct ?? 0) >= 0;
+                        const active = idx === highlightIdx;
+                        return (
+                          <button
+                            key={item.ticker}
+                            type="button"
+                            onMouseEnter={() => setHighlightIdx(idx)}
+                            onClick={() => selectTicker(item.ticker)}
+                            className={`w-full px-3 py-2 flex items-center justify-between gap-3 text-left transition cursor-pointer ${
+                              active ? "bg-slate-800/80" : "hover:bg-slate-800/40"
+                            }`}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-xs font-bold text-white">
+                                  {item.ticker}
+                                </span>
+                                {item.exchange && (
+                                  <span className="rounded bg-slate-900 px-1 py-0.2 font-mono text-[9.5px] text-slate-500">
+                                    {item.exchange}
+                                  </span>
+                                )}
+                                {item.sector && (
+                                  <span className="text-[10px] text-slate-500 truncate">
+                                    {item.sector}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[11px] text-slate-400 truncate">
+                                {item.company_name}
+                              </p>
+                            </div>
+
+                            {typeof item.price === "number" && (
+                              <div className="text-right font-mono shrink-0 tabular-nums">
+                                <div className="text-xs font-semibold text-slate-200">
+                                  ${item.price.toFixed(2)}
+                                </div>
+                                {typeof item.change_pct === "number" && (
+                                  <div
+                                    className={`text-[10px] ${
+                                      up ? "text-emerald-400" : "text-rose-400"
+                                    }`}
+                                  >
+                                    {up ? "+" : ""}
+                                    {item.change_pct.toFixed(2)}%
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Live Market Movers Strip (Dynamic, All-Sector) */}
+            <div className="hidden lg:flex items-center gap-1 overflow-x-auto no-scrollbar min-w-0">
+              {movers.map((mv) => {
+                const isSelected = ticker === mv.ticker;
+                const up = (mv.change_pct ?? 0) >= 0;
+                return (
+                  <button
+                    key={mv.ticker}
+                    type="button"
+                    onClick={() => selectTicker(mv.ticker)}
+                    title={mv.company_name}
+                    className={`inline-flex items-center gap-1 rounded px-2 py-0.5 font-mono text-[11px] shrink-0 transition cursor-pointer ${
+                      isSelected
+                        ? "bg-emerald-500/20 text-emerald-200 border border-emerald-500/40"
+                        : "text-slate-400 hover:text-slate-100 border border-transparent hover:border-slate-800"
+                    }`}
+                  >
+                    <span className="font-semibold">{mv.ticker}</span>
+                    {typeof mv.change_pct === "number" && (
+                      <span
+                        className={`text-[10px] tabular-nums ${
+                          up ? "text-emerald-400" : "text-rose-400"
+                        }`}
+                      >
+                        {up ? "+" : ""}
+                        {mv.change_pct.toFixed(1)}%
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
-          {/* Right Status & 5/Day No-Login Quota Pill */}
-          <div className="flex items-center gap-2.5">
+          {/* Right Status & Quota */}
+          <div className="flex items-center gap-2 shrink-0">
+            <span
+              title={`Tier 1: ${engineInfo.tier1Model} · Tier 2: ${engineInfo.tier2Model}`}
+              className="hidden xl:inline-flex items-center gap-1 rounded-md border border-slate-800/90 bg-[#0b111e] px-2 py-1 font-mono text-[10.5px] text-slate-400"
+            >
+              <Cpu className="h-3 w-3 text-emerald-400" />
+              <span>
+                {engineInfo.tier1Model} + {engineInfo.tier2Model}
+              </span>
+            </span>
+
             <div
               title={formatResetCountdown(quota.reset_at)}
-              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-mono tabular-nums ${
+              className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-[11px] font-mono tabular-nums ${
                 quota.remaining > 1
-                  ? "border-blue-500/30 bg-blue-950/30 text-blue-200"
+                  ? "border-slate-800 bg-[#0b111e] text-slate-200"
                   : quota.remaining === 1
                   ? "border-amber-500/40 bg-amber-950/30 text-amber-200"
                   : "border-rose-500/40 bg-rose-950/30 text-rose-200"
               }`}
             >
-              <Zap className="h-3.5 w-3.5 text-amber-400" />
+              <Zap className="h-3 w-3 text-amber-400" />
               <span>
-                {quota.remaining}/{quota.limit} Free Queries Today
-              </span>
-              <span className="hidden sm:inline text-[10px] text-slate-400">
-                · No Login
+                {quota.remaining}/{quota.limit}
               </span>
             </div>
 
@@ -526,148 +853,58 @@ export function ResearchTerminal({ initialReport = null }: Props) {
               href="https://github.com/iamqazolp/CompanyScope"
               target="_blank"
               rel="noreferrer"
-              className="hidden sm:inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-[#0d1422] px-2.5 py-1.5 text-xs text-slate-300 hover:border-slate-700 hover:text-white transition"
+              title="GitHub Repository"
+              className="inline-flex items-center gap-1 rounded-md border border-slate-800 bg-[#0b111e] px-2 py-1 text-xs text-slate-400 hover:border-slate-700 hover:text-white transition"
             >
-              <span>GitHub</span>
-              <ArrowUpRight className="h-3.5 w-3.5 text-slate-500" />
+              <span className="hidden sm:inline">GitHub</span>
+              <ArrowUpRight className="h-3.5 w-3.5" />
             </a>
           </div>
         </div>
       </header>
 
-      {/* Main Content Container */}
-      <main className="flex-1 mx-auto w-full max-w-[1520px] px-4 sm:px-6 py-5">
-        {/* Live Cross-Asset Market Tape & 0-Quota AI Market News Recap */}
-        <MarketRecapBar
-          onInspectRecapCitation={(recapCits, idx) => {
-            setInspectorOverride(recapCits);
-            setSelectedCitIdx(idx);
-            setMobileDrawerOpen(true);
-          }}
-        />
+      {/* Slim Cross-Asset Benchmark Strip */}
+      <MarketRecapBar
+        data={recap}
+        loading={recapLoading}
+        briefActive={rightTab === "brief"}
+        onOpenBrief={() => {
+          setRightTab("brief");
+          setMobileDrawerOpen(true);
+        }}
+      />
 
-        {/* Instant Showcase Banner (Zero Quota Cost) */}
-        {showcases.length > 0 && (
-          <div className="mb-5 flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-emerald-400 mr-1">
-              <Sparkles className="h-3.5 w-3.5" />
-              Instant Verified Reports (0 Quota):
-            </span>
-            {showcases.map((sc) => {
-              const isCurrent = activeSlug === sc.slug;
-              return (
-                <button
-                  key={sc.slug}
-                  type="button"
-                  onClick={() => loadShowcase(sc.slug)}
-                  className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs transition ${
-                    isCurrent
-                      ? "border-emerald-400/50 bg-emerald-500/15 text-emerald-100"
-                      : "border-slate-800 bg-[#0d1422] text-slate-300 hover:border-slate-700 hover:text-white"
-                  }`}
-                >
-                  <span className="font-mono font-semibold text-emerald-400">
-                    {sc.tickers.join("+")}
-                  </span>
-                  <span className="truncate max-w-[260px] sm:max-w-none">
-                    {sc.title}
-                  </span>
-                  <span className="hidden md:inline rounded bg-slate-800/90 px-1.5 py-0.5 font-mono text-[10px] text-slate-400">
-                    {sc.citations_count} cits
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        )}
+      {/* Main 12-Col Workspace */}
+      <main className="flex-1 mx-auto w-full max-w-[1520px] px-4 sm:px-6 py-4">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+          {/* Left 8 Cols: Live Chart Deck -> Command Bar -> Research Output */}
+          <div className="lg:col-span-7 xl:col-span-8 space-y-3.5">
+            {/* 1. Live TradingView Chart + Multiples + XBRL Deck */}
+            <TradingViewChart
+              ticker={ticker}
+              xbrlRows={financials}
+              quarterlyRows={quarterlyFinancials}
+              xbrlLoading={finLoading}
+              onQuoteLoaded={setActiveQuote}
+              onAuditMetric={(promptText) => {
+                setQuestion(promptText);
+                runLiveQuery({
+                  q: promptText,
+                  tkr: ticker,
+                  peers: "",
+                  m: "multi_agent",
+                });
+              }}
+            />
 
-        {/* Two-Column Analyst Terminal Layout */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-          {/* Left / Center Research Column (7 cols on lg) */}
-          <div className="lg:col-span-7 xl:col-span-8 space-y-4">
-            {/* Query Composer & Ticker Controls Card */}
-            <div className="rounded-xl border border-slate-800/90 bg-[#0d1422] p-4 shadow-xl shadow-black/25 space-y-3.5">
-              {/* Ticker & Orchestration Controls */}
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="flex items-center gap-1.5">
-                    <label className="text-[11px] font-medium text-slate-400">
-                      Ticker
-                    </label>
-                    <input
-                      type="text"
-                      value={ticker}
-                      onChange={(e) => setTicker(e.target.value.toUpperCase())}
-                      maxLength={6}
-                      className="w-20 rounded-lg border border-slate-700/80 bg-[#080d18] px-2.5 py-1 font-mono text-xs font-semibold uppercase text-white focus:border-blue-500 focus:outline-none"
-                    />
-                  </div>
-
-                  <div className="hidden sm:flex items-center gap-1">
-                    {POPULAR_TICKERS.map((sym) => (
-                      <button
-                        key={sym}
-                        type="button"
-                        onClick={() => setTicker(sym)}
-                        className={`rounded px-1.5 py-0.5 font-mono text-[10.5px] transition ${
-                          ticker === sym
-                            ? "bg-blue-500/25 text-blue-200 border border-blue-500/40"
-                            : "text-slate-500 hover:text-slate-300"
-                        }`}
-                      >
-                        {sym}
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="flex items-center gap-1.5 ml-1">
-                    <label className="text-[11px] font-medium text-slate-400">
-                      vs. Peers
-                    </label>
-                    <input
-                      type="text"
-                      value={peerInput}
-                      onChange={(e) =>
-                        setPeerInput(e.target.value.toUpperCase())
-                      }
-                      placeholder="e.g. MSFT, NVDA"
-                      className="w-28 sm:w-32 rounded-lg border border-slate-800 bg-[#080d18] px-2.5 py-1 font-mono text-xs uppercase text-slate-200 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none"
-                    />
-                  </div>
-                </div>
-
-                {/* Mode Selector */}
-                <div className="inline-flex rounded-lg border border-slate-800 bg-[#080d18] p-0.5">
-                  {(
-                    [
-                      ["multi_agent", "Multi-Agent"],
-                      ["auto", "Auto"],
-                      ["single", "Single"],
-                    ] as const
-                  ).map(([val, label]) => (
-                    <button
-                      key={val}
-                      type="button"
-                      onClick={() => setMode(val)}
-                      className={`px-2.5 py-1 text-[11px] font-medium rounded-md transition ${
-                        mode === val
-                          ? "bg-emerald-500/20 text-emerald-200 border border-emerald-500/40"
-                          : "text-slate-400 hover:text-slate-200 border border-transparent"
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Prompt Input */}
+            {/* 2. Unified All-Market Analyst Command Composer */}
+            <div className="rounded-xl border border-slate-800/90 bg-[#0b111d] p-3 space-y-2.5">
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
                   runLiveQuery();
                 }}
-                className="relative"
+                className="rounded-lg border border-slate-800 bg-[#070b14] focus-within:border-emerald-500/50 transition"
               >
                 <textarea
                   rows={2}
@@ -679,77 +916,203 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                       runLiveQuery();
                     }
                   }}
-                  placeholder="Ask any SEC 10-K/10-Q/8-K, XBRL financial ratio, earnings call, or market sentiment question..."
-                  className="w-full resize-none rounded-xl border border-slate-700/80 bg-[#080d18] pl-3.5 pr-28 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-emerald-500/60 focus:outline-none"
+                  placeholder={`Ask about ${ticker} or any US public company (e.g., "Compare ${ticker} vs ${topPeer} margins & P/E", "Audit Palantir's 10-K risks")...`}
+                  className="w-full resize-none bg-transparent px-3 pt-2.5 pb-1.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none"
                 />
-                <button
-                  type="submit"
-                  disabled={isStreaming || !question.trim() || quota.remaining <= 0}
-                  className="absolute right-2.5 bottom-2.5 inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-800 disabled:text-slate-500 px-3.5 py-1.5 text-xs font-semibold text-slate-950 transition cursor-pointer disabled:cursor-not-allowed"
-                >
-                  {isStreaming ? (
-                    <>
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      <span>Running</span>
-                    </>
-                  ) : (
-                    <>
-                      <Send className="h-3.5 w-3.5" />
-                      <span>Analyze</span>
-                    </>
-                  )}
-                </button>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 pb-2 pt-1 border-t border-slate-800/60">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <div className="inline-flex items-center gap-1.5 rounded border border-slate-800 bg-[#0b111e] px-2 py-0.5">
+                      <span className="text-[10.5px] font-mono text-slate-500">
+                        +Peers
+                      </span>
+                      <input
+                        type="text"
+                        value={peerInput}
+                        onChange={(e) =>
+                          setPeerInput(e.target.value.toUpperCase())
+                        }
+                        placeholder={suggestedPeers.slice(0, 2).join(", ")}
+                        className="w-24 bg-transparent font-mono text-[11px] uppercase text-slate-200 placeholder:text-slate-600 focus:outline-none"
+                      />
+                    </div>
+
+                    {/* One-click dynamic sector peer suggestions */}
+                    <div className="hidden sm:flex items-center gap-1">
+                      {suggestedPeers.slice(0, 2).map((p) => {
+                        const added = peerInput
+                          .split(",")
+                          .map((x) => x.trim())
+                          .includes(p);
+                        return (
+                          <button
+                            key={p}
+                            type="button"
+                            onClick={() => {
+                              const cur = peerInput
+                                .split(",")
+                                .map((x) => x.trim())
+                                .filter(Boolean);
+                              const next = added
+                                ? cur.filter((x) => x !== p)
+                                : [...cur, p].slice(0, 3);
+                              setPeerInput(next.join(", "));
+                            }}
+                            className={`rounded px-1.5 py-0.5 font-mono text-[10px] border transition cursor-pointer ${
+                              added
+                                ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                                : "border-slate-800/80 bg-[#080d17] text-slate-500 hover:text-slate-300"
+                            }`}
+                          >
+                            +{p}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="inline-flex rounded border border-slate-800 bg-[#0b111e] p-0.5">
+                      {(
+                        [
+                          ["multi_agent", "Multi"],
+                          ["auto", "Auto"],
+                          ["single", "Single"],
+                        ] as const
+                      ).map(([val, lbl]) => (
+                        <button
+                          key={val}
+                          type="button"
+                          onClick={() => setMode(val)}
+                          className={`px-2 py-0.5 text-[10.5px] font-mono rounded transition cursor-pointer ${
+                            mode === val
+                              ? "bg-slate-800 text-emerald-300"
+                              : "text-slate-500 hover:text-slate-300"
+                          }`}
+                        >
+                          {lbl}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={
+                      isStreaming || !question.trim() || quota.remaining <= 0
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-md bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-800 disabled:text-slate-500 px-3 py-1 text-xs font-semibold text-slate-950 transition cursor-pointer disabled:cursor-not-allowed"
+                  >
+                    {isStreaming ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        <span>Running</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send className="h-3 w-3" />
+                        <span>Run</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </form>
 
-              {/* Preset Analytical Prompt Chips */}
-              <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                <span className="text-[10.5px] text-slate-500 mr-1">
-                  Live Queries (uses 1 quota):
-                </span>
-                {QUICK_PROMPTS.map((preset) => (
-                  <button
-                    key={preset.label}
-                    type="button"
-                    disabled={isStreaming || quota.remaining <= 0}
-                    onClick={() => {
-                      setTicker(preset.ticker);
-                      setPeerInput(preset.peers);
-                      setMode(preset.mode as "multi_agent");
-                      setQuestion(preset.q);
-                      runLiveQuery({
-                        q: preset.q,
-                        tkr: preset.ticker,
-                        peers: preset.peers,
-                        m: preset.mode as "multi_agent",
-                      });
-                    }}
-                    className="rounded-md border border-slate-800 bg-[#090f1c] hover:border-slate-700 px-2.5 py-1 text-[11px] text-slate-300 hover:text-white transition disabled:opacity-40"
-                  >
-                    {preset.label}
-                  </button>
-                ))}
+              {/* Dynamic Quick Actions + Compact Multi-Sector Samples Dropdown */}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {quickActions.map((act) => (
+                    <button
+                      key={act.label}
+                      type="button"
+                      disabled={isStreaming || quota.remaining <= 0}
+                      onClick={() => {
+                        setPeerInput(act.peers);
+                        setMode(act.mode);
+                        setQuestion(act.query);
+                        runLiveQuery({
+                          q: act.query,
+                          tkr: ticker,
+                          peers: act.peers,
+                          m: act.mode,
+                        });
+                      }}
+                      className="rounded-md border border-slate-800/90 bg-[#080d17] hover:border-slate-700 px-2.5 py-1 text-[11px] text-slate-300 hover:text-white transition disabled:opacity-40 cursor-pointer"
+                    >
+                      {act.label}
+                    </button>
+                  ))}
+                </div>
+
+                {showcases.length > 0 && (
+                  <div ref={samplesRef} className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setSamplesMenuOpen((v) => !v)}
+                      className="inline-flex items-center gap-1 rounded-md border border-slate-800 bg-[#080d17] hover:border-slate-700 px-2.5 py-1 text-[11px] font-mono text-emerald-400 hover:text-emerald-300 transition cursor-pointer"
+                    >
+                      <FileCheck2 className="h-3 w-3" />
+                      <span>Instant Audits</span>
+                      <ChevronDown className="h-3 w-3 opacity-70" />
+                    </button>
+
+                    {samplesMenuOpen && (
+                      <div className="absolute right-0 mt-1.5 w-72 rounded-lg border border-slate-700/90 bg-[#0b111e] shadow-2xl overflow-hidden z-40">
+                        <div className="px-3 py-1.5 border-b border-slate-800/80 text-[10px] font-mono text-slate-500">
+                          ZERO-QUOTA VERIFIED REPORTS
+                        </div>
+                        <div className="divide-y divide-slate-800/60">
+                          {showcases.map((sc) => (
+                            <button
+                              key={sc.slug}
+                              type="button"
+                              onClick={() => loadShowcase(sc.slug)}
+                              className={`w-full px-3 py-2 text-left hover:bg-slate-800/60 transition cursor-pointer ${
+                                activeSlug === sc.slug ? "bg-emerald-500/10" : ""
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
+                                <span className="font-bold text-emerald-300">
+                                  {sc.tickers.join(" vs ")}
+                                </span>
+                                <span className="text-[10px] text-slate-500">
+                                  {sc.category}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-slate-300 line-clamp-1 mt-0.5">
+                                {sc.title}
+                              </p>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 
-            {/* Error or Quota Exhausted Alert */}
+            {/* Error Alert */}
             {errorBanner && (
-              <div className="rounded-xl border border-rose-500/40 bg-rose-950/25 px-4 py-3 text-xs text-rose-200 flex items-center justify-between gap-3">
+              <div className="rounded-lg border border-rose-500/40 bg-rose-950/25 px-3.5 py-2.5 text-xs text-rose-200 flex items-center justify-between gap-3">
                 <span>{errorBanner}</span>
                 <button
                   type="button"
                   onClick={() => setErrorBanner(null)}
-                  className="text-rose-400 hover:text-rose-200 font-mono"
+                  className="text-rose-400 hover:text-rose-200 cursor-pointer"
                 >
-                  Dismiss
+                  <X className="h-3.5 w-3.5" />
                 </button>
               </div>
             )}
 
-            {/* Live SSE Execution Timeline */}
+            {/* Collapsible Execution Trace */}
             {(isStreaming || steps.length > 0) && (
-              <div className="rounded-xl border border-slate-800/80 bg-[#0b111e] p-3.5">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
+              <div className="rounded-xl border border-slate-800/80 bg-[#090e19] px-3.5 py-2">
+                <button
+                  type="button"
+                  onClick={() => setTraceExpanded((v) => !v)}
+                  className="w-full flex items-center justify-between text-xs font-mono text-slate-300 cursor-pointer"
+                >
+                  <span className="inline-flex items-center gap-2">
                     {isStreaming ? (
                       <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-400" />
                     ) : (
@@ -757,73 +1120,102 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                     )}
                     <span>
                       {isStreaming
-                        ? "Live Multi-Agent & Citation Guard Execution..."
-                        : "Execution Trace Completed"}
+                        ? steps[steps.length - 1]?.label || "Running agents..."
+                        : `Trace · ${steps.length} steps`}
                     </span>
-                  </div>
-                  <span className="font-mono text-[10px] text-slate-500">
-                    {steps.length} events
                   </span>
-                </div>
-                <div className="space-y-1 max-h-36 overflow-y-auto pr-1">
-                  {steps.map((st) => (
-                    <div
-                      key={st.id}
-                      className={`flex items-center gap-2 font-mono text-[11px] ${
-                        st.escalated || st.type === "tier_escalation"
-                          ? "text-amber-300"
-                          : "text-slate-400"
-                      }`}
-                    >
-                      <span
-                        className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+                  <span className="inline-flex items-center gap-1 text-[10.5px] text-slate-500">
+                    {traceExpanded ? (
+                      <ChevronUp className="h-3.5 w-3.5" />
+                    ) : (
+                      <ChevronDown className="h-3.5 w-3.5" />
+                    )}
+                  </span>
+                </button>
+
+                {(isStreaming || traceExpanded) && (
+                  <div className="mt-2 pt-2 border-t border-slate-800/70 space-y-1 max-h-32 overflow-y-auto pr-1">
+                    {steps.map((st) => (
+                      <div
+                        key={st.id}
+                        className={`flex items-center gap-2 font-mono text-[10.5px] ${
                           st.escalated || st.type === "tier_escalation"
-                            ? "bg-amber-400"
-                            : "bg-emerald-400/80"
+                            ? "text-amber-300"
+                            : "text-slate-400"
                         }`}
-                      />
-                      <span className="truncate">{st.label}</span>
-                    </div>
-                  ))}
-                </div>
+                      >
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+                            st.escalated || st.type === "tier_escalation"
+                              ? "bg-amber-400"
+                              : "bg-emerald-400/80"
+                          }`}
+                        />
+                        <span className="truncate">{st.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
-            {/* Verified Research Answer & Sub-Agent Reports */}
+            {/* 3. Research Synthesis Output Card */}
             {result && (
-              <article className="rounded-xl border border-slate-800/90 bg-[#0d1422] overflow-hidden shadow-xl shadow-black/25">
-                {/* Report Header Bar */}
-                <div className="px-5 py-3.5 border-b border-slate-800/80 bg-[#0a101d] flex flex-wrap items-center justify-between gap-3">
-                  <div className="space-y-0.5 min-w-0 flex-1">
-                    <div className="flex items-center gap-2 text-[11px] text-emerald-400 font-medium">
-                      <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
-                      <span>100% Citation-Verified Research Synthesis</span>
-                    </div>
+              <article className="rounded-xl border border-slate-800/90 bg-[#0b111d] overflow-hidden">
+                <div className="px-4 py-2.5 border-b border-slate-800/80 bg-[#090e19] flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0 flex-1">
                     {activeQuestion && (
-                      <h1 className="text-sm font-semibold text-slate-100 truncate">
+                      <h1 className="text-xs sm:text-sm font-semibold text-slate-100 truncate">
                         {activeQuestion}
                       </h1>
                     )}
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {result.sub_agent_reports &&
+                      result.sub_agent_reports.length > 0 && (
+                        <div className="inline-flex rounded-md border border-slate-800 bg-[#070b14] p-0.5">
+                          <button
+                            type="button"
+                            onClick={() => setActiveTab("synthesis")}
+                            className={`px-2 py-0.5 rounded text-[11px] font-medium transition cursor-pointer ${
+                              activeTab === "synthesis"
+                                ? "bg-slate-800 text-white"
+                                : "text-slate-400 hover:text-slate-200"
+                            }`}
+                          >
+                            Synthesis
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setActiveTab("specialists")}
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium transition cursor-pointer ${
+                              activeTab === "specialists"
+                                ? "bg-slate-800 text-white"
+                                : "text-slate-400 hover:text-slate-200"
+                            }`}
+                          >
+                            <Layers className="h-3 w-3 text-blue-400" />
+                            <span>Agents ({result.sub_agent_reports.length})</span>
+                          </button>
+                        </div>
+                      )}
+
                     {activeSlug && (
                       <button
                         type="button"
                         onClick={handleCopyPermalink}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700/80 bg-[#0d1526] hover:border-emerald-500/50 px-2.5 py-1.5 text-xs text-slate-200 transition"
+                        title="Copy shareable report link"
+                        className="inline-flex items-center gap-1 rounded-md border border-slate-800 bg-[#070b14] hover:border-slate-700 px-2 py-1 text-[11px] text-slate-300 transition cursor-pointer"
                       >
                         {copiedLink ? (
-                          <>
-                            <Check className="h-3.5 w-3.5 text-emerald-400" />
-                            <span className="text-emerald-300">Copied URL</span>
-                          </>
+                          <Check className="h-3 w-3 text-emerald-400" />
                         ) : (
-                          <>
-                            <Share2 className="h-3.5 w-3.5 text-slate-400" />
-                            <span>Share Report</span>
-                          </>
+                          <Share2 className="h-3 w-3 text-slate-400" />
                         )}
+                        <span className="hidden sm:inline">
+                          {copiedLink ? "Copied" : "Share"}
+                        </span>
                       </button>
                     )}
 
@@ -832,94 +1224,61 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                         type="button"
                         onClick={() => {
                           setInspectorOverride(null);
+                          setRightTab("sources");
                           setMobileDrawerOpen(true);
                         }}
-                        className="lg:hidden inline-flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-xs text-emerald-300"
+                        className="lg:hidden inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] font-mono text-emerald-300"
                       >
                         <span>Sources ({reportCitations.length})</span>
                       </button>
                     )}
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setResult(null);
+                        setActiveSlug(null);
+                        setSteps([]);
+                      }}
+                      title="Close report"
+                      className="rounded-md p-1 text-slate-500 hover:bg-slate-800 hover:text-slate-200 transition cursor-pointer"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
                   </div>
                 </div>
 
-                {/* Synthesis vs Specialist Sub-Agents Tabs */}
-                {result.sub_agent_reports &&
-                  result.sub_agent_reports.length > 0 && (
-                    <div className="px-5 pt-2.5 border-b border-slate-800/70 bg-[#090f1b] flex items-center gap-4">
-                      <button
-                        type="button"
-                        onClick={() => setActiveTab("synthesis")}
-                        className={`pb-2 text-xs font-medium border-b-2 transition ${
-                          activeTab === "synthesis"
-                            ? "border-emerald-400 text-emerald-300"
-                            : "border-transparent text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        Executive Synthesis
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setActiveTab("specialists")}
-                        className={`pb-2 text-xs font-medium border-b-2 transition inline-flex items-center gap-1.5 ${
-                          activeTab === "specialists"
-                            ? "border-blue-400 text-blue-300"
-                            : "border-transparent text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        <Layers className="h-3.5 w-3.5" />
-                        <span>
-                          Specialist Sub-Agents (
-                          {result.sub_agent_reports.length})
-                        </span>
-                      </button>
-                    </div>
-                  )}
-
-                {/* Main Body */}
-                <div className="p-5 space-y-5">
+                <div className="p-4 space-y-4">
                   {activeTab === "synthesis" ? (
                     <MarkdownView content={result.answer} />
                   ) : (
-                    <div className="space-y-3">
+                    <div className="space-y-2.5">
                       {(result.sub_agent_reports || []).map((sub) => (
                         <div
                           key={sub.agent}
-                          className="rounded-lg border border-slate-800 bg-[#090e19] p-3.5 space-y-2"
+                          className="rounded-lg border border-slate-800 bg-[#080c16] p-3 space-y-2"
                         >
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="inline-flex items-center gap-1.5 font-mono text-xs font-semibold text-blue-300">
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono">
+                            <div className="flex items-center gap-2">
+                              <span className="inline-flex items-center gap-1 font-semibold text-blue-300">
                                 <Bot className="h-3.5 w-3.5" />
                                 {sub.agent}
                               </span>
                               {sub.model && (
                                 <span
-                                  title={
-                                    sub.escalation_reason
-                                      ? sub.escalation_reason.replace(/_/g, " ")
-                                      : undefined
-                                  }
-                                  className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] ${
+                                  className={`rounded border px-1.5 py-0.5 text-[10px] ${
                                     sub.escalated
                                       ? "border-amber-500/40 bg-amber-500/15 text-amber-200"
-                                      : sub.tier === "tier1"
-                                      ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-200"
-                                      : "border-slate-700 bg-slate-800/70 text-slate-300"
+                                      : "border-slate-800 bg-slate-900 text-slate-400"
                                   }`}
                                 >
-                                  {sub.escalated
-                                    ? `⚡ Tier 1 Escalated · ${sub.model}`
-                                    : `${
-                                        sub.tier === "tier1"
-                                          ? "Tier 1"
-                                          : "Tier 2"
-                                      } · ${sub.model}`}
+                                  {sub.model}
+                                  {sub.escalated ? " ⚡" : ""}
                                 </span>
                               )}
                             </div>
-                            <span className="font-mono text-[10.5px] text-slate-500">
-                              {sub.citations_count} verified citations ·{" "}
-                              {sub.self_corrections} retries
+                            <span className="text-slate-500">
+                              {sub.citations_count} cits
                             </span>
                           </div>
                           <MarkdownView content={sub.answer} />
@@ -928,88 +1287,72 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                     </div>
                   )}
 
-                  {/* Interactive Citation Evidence Pills */}
+                  {/* Compact Citation Chips */}
                   {reportCitations.length > 0 && (
-                    <div className="pt-4 border-t border-slate-800/80">
-                      <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2.5">
-                        Verified Source Citations (Click to Inspect Primary Filing / Live Quote / XBRL)
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        {reportCitations.map((cit, idx) => {
-                          const selected =
-                            inspectorOverride === null &&
-                            (selectedCitIdx ?? 0) === idx;
-                          const style =
-                            cit.type === "numeric" || cit.type === "market"
-                              ? selected
-                                ? "border-blue-400 bg-blue-500/20 text-blue-100"
-                                : "border-blue-500/25 bg-blue-950/20 text-blue-300 hover:border-blue-400/50"
-                              : cit.type === "sentiment" ||
-                                cit.type === "insider"
-                              ? selected
-                                ? "border-amber-400 bg-amber-500/20 text-amber-100"
-                                : "border-amber-500/25 bg-amber-950/20 text-amber-300 hover:border-amber-400/50"
-                              : selected
-                              ? "border-emerald-400 bg-emerald-500/20 text-emerald-100"
-                              : "border-emerald-500/25 bg-emerald-950/20 text-emerald-300 hover:border-emerald-400/50";
+                    <div className="pt-3 border-t border-slate-800/70 flex flex-wrap items-center gap-1.5">
+                      {reportCitations.map((cit, idx) => {
+                        const selected =
+                          rightTab === "sources" &&
+                          inspectorOverride === null &&
+                          (selectedCitIdx ?? 0) === idx;
+                        const style =
+                          cit.type === "numeric" || cit.type === "market"
+                            ? selected
+                              ? "border-blue-400 bg-blue-500/20 text-blue-100"
+                              : "border-blue-500/25 bg-blue-950/20 text-blue-300 hover:border-blue-400/50"
+                            : cit.type === "sentiment" || cit.type === "insider"
+                            ? selected
+                              ? "border-amber-400 bg-amber-500/20 text-amber-100"
+                              : "border-amber-500/25 bg-amber-950/20 text-amber-300 hover:border-amber-400/50"
+                            : selected
+                            ? "border-emerald-400 bg-emerald-500/20 text-emerald-100"
+                            : "border-emerald-500/25 bg-emerald-950/20 text-emerald-300 hover:border-amber-400/50";
 
-                          return (
-                            <button
-                              key={idx}
-                              type="button"
-                              onClick={() => {
-                                setInspectorOverride(null);
-                                setSelectedCitIdx(idx);
-                                setMobileDrawerOpen(true);
-                              }}
-                              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 font-mono text-[11px] transition cursor-pointer ${style}`}
-                            >
-                              <span className="opacity-70">[{idx + 1}]</span>
-                              <span>{citationBadgeLabel(cit)}</span>
-                            </button>
-                          );
-                        })}
-                      </div>
+                        return (
+                          <button
+                            key={idx}
+                            type="button"
+                            onClick={() => {
+                              setInspectorOverride(null);
+                              setSelectedCitIdx(idx);
+                              setRightTab("sources");
+                              setMobileDrawerOpen(true);
+                            }}
+                            className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 font-mono text-[10.5px] transition cursor-pointer ${style}`}
+                          >
+                            <span className="opacity-70">[{idx + 1}]</span>
+                            <span>{citationBadgeLabel(cit)}</span>
+                          </button>
+                        );
+                      })}
                     </div>
                   )}
 
-                  {/* Telemetry Footer */}
-                  <div className="pt-3 border-t border-slate-800/60 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-slate-500">
-                    <div className="flex flex-wrap items-center gap-3">
+                  {/* Minimal Telemetry Footer */}
+                  <div className="pt-2.5 border-t border-slate-800/50 flex flex-wrap items-center justify-between gap-2 text-[10.5px] font-mono text-slate-500">
+                    <div className="flex flex-wrap items-center gap-2.5">
                       {result.model && (
-                        <span className="inline-flex items-center gap-1 text-emerald-300/90">
-                          <Cpu className="h-3 w-3 text-emerald-400" />
-                          <span>
-                            {result.tier === "tier2" ? "Tier 2:" : "Tier 1:"}{" "}
-                            {result.model}
-                            {result.escalated ? " ⚡" : ""}
-                          </span>
+                        <span className="text-slate-300">
+                          {result.model}
+                          {result.escalated ? " ⚡" : ""}
                         </span>
                       )}
                       {result.tier_breakdown &&
                         result.tier_breakdown.tier2_agents.length > 0 && (
-                          <span className="text-slate-400">
-                            Sub-Agents: {result.tier_breakdown.tier2_agents.length}×{" "}
+                          <span>
+                            + {result.tier_breakdown.tier2_agents.length}×{" "}
                             {result.tier_breakdown.tier2_model}
-                            {result.tier_breakdown.escalated_agents.length > 0
-                              ? ` · ${result.tier_breakdown.escalated_agents.length}× ${result.tier_breakdown.tier1_model} ⚡`
-                              : ""}
                           </span>
                         )}
                       {typeof result.latency_ms === "number" && (
                         <span className="inline-flex items-center gap-1 tabular-nums">
-                          <Clock className="h-3 w-3 text-slate-400" />
-                          {(result.latency_ms / 1000).toFixed(2)}s
+                          <Clock className="h-3 w-3" />
+                          {(result.latency_ms / 1000).toFixed(1)}s
                         </span>
                       )}
                       {typeof result.cost_usd === "number" && (
                         <span className="tabular-nums">
-                          ${result.cost_usd.toFixed(5)}
-                        </span>
-                      )}
-                      {result.used_tools && result.used_tools.length > 0 && (
-                        <span className="text-slate-400">
-                          Tools: {result.used_tools.join(" · ")}
+                          ${result.cost_usd.toFixed(4)}
                         </span>
                       )}
                     </div>
@@ -1021,7 +1364,7 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                         rel="noreferrer"
                         className="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300"
                       >
-                        <span>Langfuse OTel Trace</span>
+                        <span>Trace</span>
                         <ExternalLink className="h-3 w-3" />
                       </a>
                     )}
@@ -1029,40 +1372,53 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                 </div>
               </article>
             )}
-
-            {/* TradingView Live OHLCV + TradingView Studio + SEC XBRL Chart Deck */}
-            <TradingViewChart
-              ticker={ticker}
-              xbrlRows={financials}
-              xbrlLoading={finLoading}
-            />
           </div>
 
-          {/* Right Sticky Primary Source Inspector (5 cols on lg) */}
-          <div className="hidden lg:block lg:col-span-5 xl:col-span-4 sticky top-20 h-[calc(100vh-6.5rem)]">
+          {/* Right 4 Cols: Dual-Mode Source Inspector & Live Market Brief */}
+          <div className="hidden lg:block lg:col-span-5 xl:col-span-4 sticky top-16 h-[calc(100vh-5rem)]">
             <SourceInspector
+              panelTab={rightTab}
+              onChangeTab={setRightTab}
               citation={activeCitation}
               allCitations={inspectorCitations}
               selectedIndex={
                 selectedCitIdx ?? (inspectorCitations.length ? 0 : null)
               }
               onSelectIndex={(i) => setSelectedCitIdx(i)}
+              recap={recap}
+              recapRefreshing={recapRefreshing}
+              onRefreshRecap={() => fetchRecap(true)}
+              onInspectRecapCitation={(cits, idx) => {
+                setInspectorOverride(cits);
+                setSelectedCitIdx(idx);
+                setRightTab("sources");
+              }}
             />
           </div>
         </div>
       </main>
 
-      {/* Mobile Source Inspector Modal */}
+      {/* Mobile Drawer */}
       {mobileDrawerOpen && (
         <div className="fixed inset-0 z-50 lg:hidden bg-black/75 backdrop-blur-sm p-3 flex flex-col">
           <div className="flex-1 overflow-hidden">
             <SourceInspector
+              panelTab={rightTab}
+              onChangeTab={setRightTab}
               citation={activeCitation}
               allCitations={inspectorCitations}
               selectedIndex={
                 selectedCitIdx ?? (inspectorCitations.length ? 0 : null)
               }
               onSelectIndex={(i) => setSelectedCitIdx(i)}
+              recap={recap}
+              recapRefreshing={recapRefreshing}
+              onRefreshRecap={() => fetchRecap(true)}
+              onInspectRecapCitation={(cits, idx) => {
+                setInspectorOverride(cits);
+                setSelectedCitIdx(idx);
+                setRightTab("sources");
+              }}
               onCloseMobile={() => setMobileDrawerOpen(false)}
             />
           </div>

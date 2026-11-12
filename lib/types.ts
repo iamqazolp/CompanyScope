@@ -106,19 +106,51 @@ export interface SavedReport {
 
 export interface FinancialRow {
   year: number;
+  period?: string;
+  period_end?: string;
   Revenue?: number | null;
-  "Net Income"?: number | null;
+  "Gross Profit"?: number | null;
+  "R&D Expense"?: number | null;
+  "SG&A Expense"?: number | null;
   "Operating Income"?: number | null;
+  "Net Income"?: number | null;
+  "Diluted EPS"?: number | null;
+  "Cash & Equivalents"?: number | null;
   "Total Assets"?: number | null;
+  "Long-Term Debt"?: number | null;
   "Total Liabilities"?: number | null;
+  "Stockholders Equity"?: number | null;
+  "Net Cash"?: number | null;
   "Operating Cash Flow"?: number | null;
+  CapEx?: number | null;
   "Free Cash Flow"?: number | null;
+  "Share Repurchases"?: number | null;
+  "Dividends Paid"?: number | null;
+  "Gross Margin %"?: number | null;
+  "Operating Margin %"?: number | null;
+  "Net Margin %"?: number | null;
+  "FCF Margin %"?: number | null;
+  "ROE %"?: number | null;
+  "Debt / Equity"?: number | null;
+}
+
+export interface TickerSearchResult {
+  ticker: string;
+  company_name: string;
+  exchange?: string;
+  tradingview_symbol?: string;
+  price?: number | null;
+  change_pct?: number | null;
+  market_cap?: number | null;
+  sector?: string;
 }
 
 export interface LiveQuote {
   ticker: string;
   company_name?: string;
   exchange?: string;
+  sector?: string;
+  suggested_peers?: string[];
   tradingview_symbol?: string;
   currency?: string;
   as_of?: string;
