@@ -1,4 +1,10 @@
-export type CitationType = "numeric" | "narrative" | "earnings" | "sentiment";
+export type CitationType =
+  | "numeric"
+  | "market"
+  | "narrative"
+  | "earnings"
+  | "sentiment"
+  | "insider";
 
 export interface Citation {
   type: CitationType;
@@ -13,6 +19,7 @@ export interface Citation {
   verified_value?: number;
   unit?: string;
   filing_date?: string;
+  as_of?: string;
   form?: string;
 }
 
@@ -106,6 +113,80 @@ export interface FinancialRow {
   "Total Liabilities"?: number | null;
   "Operating Cash Flow"?: number | null;
   "Free Cash Flow"?: number | null;
+}
+
+export interface LiveQuote {
+  ticker: string;
+  company_name?: string;
+  exchange?: string;
+  tradingview_symbol?: string;
+  currency?: string;
+  as_of?: string;
+  price?: number | null;
+  previous_close?: number | null;
+  change?: number | null;
+  change_pct?: number | null;
+  volume?: number | null;
+  fifty_two_week_high?: number | null;
+  fifty_two_week_low?: number | null;
+  market_cap?: number | null;
+  enterprise_value?: number | null;
+  trailing_pe?: number | null;
+  forward_pe?: number | null;
+  ev_to_ebitda?: number | null;
+  price_to_book?: number | null;
+  dividend_yield?: number | null;
+  beta?: number | null;
+  analyst_target_mean?: number | null;
+  analyst_target_high?: number | null;
+  analyst_target_low?: number | null;
+  recommendation?: string;
+  analyst_count?: number | null;
+}
+
+export interface OhlcvCandle {
+  time: number | string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface LiveChartResponse {
+  ticker: string;
+  timeframe: string;
+  is_intraday: boolean;
+  tradingview_symbol: string;
+  period_change_pct?: number | null;
+  candles: OhlcvCandle[];
+  quote: LiveQuote;
+  error?: string;
+}
+
+export interface MarketBenchmark {
+  symbol: string;
+  label: string;
+  tradingview_symbol: string;
+  price: number | null;
+  change_pct: number | null;
+}
+
+export interface MarketHeadline {
+  title: string;
+  publisher: string;
+  age: string;
+  url: string;
+}
+
+export interface MarketRecapResponse {
+  as_of: string;
+  model: string;
+  benchmarks: MarketBenchmark[];
+  recap_markdown: string;
+  citations: Citation[];
+  headlines: MarketHeadline[];
+  error?: string;
 }
 
 export interface StreamStep {

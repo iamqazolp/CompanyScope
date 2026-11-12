@@ -8,10 +8,15 @@ import {
   MessageSquareQuote,
   Radio,
   ShieldCheck,
+  TrendingUp,
   X,
 } from "lucide-react";
 import type { Citation } from "@/lib/types";
-import { formatCompactUSD, formatExactUSD } from "@/lib/format";
+import {
+  formatCompactUSD,
+  formatExactUSD,
+  formatMarketMetric,
+} from "@/lib/format";
 
 interface Props {
   citation: Citation | null;
@@ -115,11 +120,11 @@ export function SourceInspector({
           {allCitations.map((c, idx) => {
             const active = selectedIndex === idx;
             const tone =
-              c.type === "numeric"
+              c.type === "numeric" || c.type === "market"
                 ? active
                   ? "border-blue-400/60 bg-blue-500/20 text-blue-200"
                   : "border-slate-800 bg-slate-900/70 text-slate-400 hover:text-slate-200"
-                : c.type === "sentiment"
+                : c.type === "sentiment" || c.type === "insider"
                 ? active
                   ? "border-amber-400/60 bg-amber-500/20 text-amber-200"
                   : "border-slate-800 bg-slate-900/70 text-slate-400 hover:text-slate-200"
@@ -134,7 +139,9 @@ export function SourceInspector({
                 className={`shrink-0 rounded-md border px-2 py-1 font-mono text-[10px] transition ${tone}`}
               >
                 [{idx + 1}] {c.ticker || ""}{" "}
-                {c.type === "numeric" ? c.concept : c.section || c.type}
+                {c.type === "numeric" || c.type === "market"
+                  ? c.concept
+                  : c.section || c.type}
               </button>
             );
           })}
@@ -151,10 +158,14 @@ export function SourceInspector({
               <span className="text-xs font-medium text-emerald-200">
                 {citation.type === "numeric"
                   ? "Verified Authoritative XBRL Fact"
+                  : citation.type === "market"
+                  ? "Verified Live Market Snapshot"
+                  : citation.type === "insider"
+                  ? "Verified SEC Form 4 / Live Event"
                   : citation.type === "earnings"
                   ? "Verified Earnings / 8-K Ex. 99.1 Quote"
                   : citation.type === "sentiment"
-                  ? "Verified Public Sentiment / News Excerpt"
+                  ? "Verified Live News / Investor Pulse"
                   : "RapidFuzz Verified SEC Filing Quote"}
               </span>
             </div>
@@ -163,7 +174,57 @@ export function SourceInspector({
             </span>
           </div>
 
-          {citation.type === "numeric" ? (
+          {citation.type === "market" ? (
+            <div className="space-y-3">
+              <div className="rounded-lg border border-cyan-500/30 bg-[#091220] p-3.5 space-y-2.5">
+                <div className="flex items-center gap-2 text-cyan-400 text-xs font-semibold">
+                  <TrendingUp className="h-3.5 w-3.5" />
+                  <span>
+                    {citation.ticker || "MARKET"} · Live Market & Valuation Feed
+                  </span>
+                </div>
+                <div className="pt-1">
+                  <div className="text-[11px] text-slate-500">
+                    Verified Market Metric
+                  </div>
+                  <div className="font-mono text-sm text-slate-100 font-semibold">
+                    {citation.concept}
+                  </div>
+                </div>
+                {typeof citation.verified_value === "number" && (
+                  <div className="pt-2 border-t border-slate-800/80">
+                    <div className="text-[10px] uppercase text-slate-500">
+                      Snapshot Value ({citation.unit || "USD"})
+                    </div>
+                    <div className="font-mono text-lg font-bold text-cyan-300 tabular-nums">
+                      {formatMarketMetric(citation.verified_value, citation.unit)}
+                    </div>
+                  </div>
+                )}
+                {citation.as_of && (
+                  <div className="text-[11px] text-slate-400 pt-1">
+                    Snapshot UTC:{" "}
+                    <span className="font-mono text-slate-300">
+                      {new Date(citation.as_of).toISOString().slice(0, 19).replace("T", " ")}
+                    </span>
+                  </div>
+                )}
+              </div>
+              {citation.ticker && (
+                <a
+                  href={`https://finance.yahoo.com/quote/${encodeURIComponent(
+                    citation.ticker
+                  )}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 text-xs text-cyan-400 hover:text-cyan-300 transition"
+                >
+                  <span>Verify Live Quote on Yahoo Finance ({citation.ticker})</span>
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              )}
+            </div>
+          ) : citation.type === "numeric" ? (
             <div className="space-y-3">
               <div className="rounded-lg border border-blue-500/25 bg-[#090f1d] p-3.5 space-y-2.5">
                 <div className="flex items-center gap-2 text-blue-400 text-xs font-semibold">

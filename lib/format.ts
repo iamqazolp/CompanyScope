@@ -32,9 +32,38 @@ export function formatExactUSD(value: number | null | undefined): string {
   }).format(value);
 }
 
+export function formatMarketMetric(
+  value: number | null | undefined,
+  unit?: string
+): string {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "—";
+  }
+  if (unit === "x") {
+    return `${value.toFixed(2)}x`;
+  }
+  if (unit === "%") {
+    return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+  }
+  if (Math.abs(value) >= 1e6) {
+    return formatCompactUSD(value);
+  }
+  return `$${value.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 export function citationBadgeLabel(c: Citation): string {
   const tkr = c.ticker ? `${c.ticker} ` : "";
   const yr = c.year ? `${c.year}` : "";
+  if (c.type === "market") {
+    const valPart =
+      typeof c.verified_value === "number"
+        ? ` · ${formatMarketMetric(c.verified_value, c.unit)}`
+        : "";
+    return `${tkr}LIVE · ${c.concept || "Quote"}${valPart}`.trim();
+  }
   if (c.type === "numeric") {
     const valPart =
       typeof c.verified_value === "number"
@@ -42,11 +71,14 @@ export function citationBadgeLabel(c: Citation): string {
         : "";
     return `${tkr}XBRL ${yr} · ${c.concept || "Metric"}${valPart}`.trim();
   }
+  if (c.type === "insider") {
+    return `${tkr}${c.section || "SEC Form 4"}`.trim();
+  }
   if (c.type === "earnings") {
     return `${tkr}8-K ${yr} · ${c.section || "Earnings"}`.trim();
   }
   if (c.type === "sentiment") {
-    return `${tkr}${c.section || "Market Sentiment"}`.trim();
+    return `${tkr}${c.section || "Market News"}`.trim();
   }
   return `${tkr}10-K ${yr} · ${c.section || "Filing"}`.trim();
 }

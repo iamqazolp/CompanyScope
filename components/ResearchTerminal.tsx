@@ -18,6 +18,7 @@ import {
   Zap,
 } from "lucide-react";
 import type {
+  Citation,
   FinancialRow,
   QueryResult,
   QuotaStatus,
@@ -26,19 +27,20 @@ import type {
   StreamStep,
 } from "@/lib/types";
 import { citationBadgeLabel, formatResetCountdown } from "@/lib/format";
-import { FinancialChart } from "./FinancialChart";
+import { MarketRecapBar } from "./MarketRecapBar";
 import { MarkdownView } from "./MarkdownView";
 import { SourceInspector } from "./SourceInspector";
+import { TradingViewChart } from "./TradingViewChart";
 
 const POPULAR_TICKERS = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"];
 
 const QUICK_PROMPTS = [
   {
-    label: "FY25 Margin & FCF Audit",
+    label: "📈 Live Valuation vs. FCF & Insiders",
     ticker: "AAPL",
     peers: "",
     mode: "multi_agent",
-    q: "What were Apple's FY2025 Gross Profit, R&D expense, Operating Cash Flow, and Free Cash Flow, and what supply chain risks did management highlight in Item 1A?",
+    q: "Compare Apple's live Market Cap, Forward P/E, and recent SEC Form 4 insider trades against its FY2025 XBRL Free Cash Flow and Item 1A risks.",
   },
   {
     label: "AAPL vs. MSFT Peer Compare",
@@ -126,6 +128,9 @@ export function ResearchTerminal({ initialReport = null }: Props) {
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [copiedLink, setCopiedLink] = useState<boolean>(false);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState<boolean>(false);
+  const [inspectorOverride, setInspectorOverride] = useState<
+    Citation[] | null
+  >(null);
 
   // Initial bootstrap: health, quota, showcase list, and default showcase if empty
   useEffect(() => {
@@ -209,6 +214,7 @@ export function ResearchTerminal({ initialReport = null }: Props) {
       setActiveSlug(rep.slug);
       setActiveQuestion(rep.question);
       setResult(rep.result);
+      setInspectorOverride(null);
       setSteps([]);
       setActiveTab("synthesis");
       setSelectedCitIdx(rep.result.citations?.length ? 0 : null);
@@ -247,6 +253,7 @@ export function ResearchTerminal({ initialReport = null }: Props) {
       setActiveQuestion(qText);
       setActiveSlug(null);
       setResult(null);
+      setInspectorOverride(null);
       setSelectedCitIdx(null);
       setActiveTab("synthesis");
       setSteps([
@@ -458,11 +465,12 @@ export function ResearchTerminal({ initialReport = null }: Props) {
     });
   }, [activeSlug]);
 
-  const citations = result?.citations || [];
+  const reportCitations = result?.citations || [];
+  const inspectorCitations = inspectorOverride || reportCitations;
   const activeCitation =
-    selectedCitIdx !== null && citations[selectedCitIdx]
-      ? citations[selectedCitIdx]
-      : citations[0] || null;
+    selectedCitIdx !== null && inspectorCitations[selectedCitIdx]
+      ? inspectorCitations[selectedCitIdx]
+      : inspectorCitations[0] || null;
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -529,6 +537,15 @@ export function ResearchTerminal({ initialReport = null }: Props) {
 
       {/* Main Content Container */}
       <main className="flex-1 mx-auto w-full max-w-[1520px] px-4 sm:px-6 py-5">
+        {/* Live Cross-Asset Market Tape & 0-Quota AI Market News Recap */}
+        <MarketRecapBar
+          onInspectRecapCitation={(recapCits, idx) => {
+            setInspectorOverride(recapCits);
+            setSelectedCitIdx(idx);
+            setMobileDrawerOpen(true);
+          }}
+        />
+
         {/* Instant Showcase Banner (Zero Quota Cost) */}
         {showcases.length > 0 && (
           <div className="mb-5 flex flex-wrap items-center gap-2">
@@ -810,13 +827,16 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                       </button>
                     )}
 
-                    {citations.length > 0 && (
+                    {reportCitations.length > 0 && (
                       <button
                         type="button"
-                        onClick={() => setMobileDrawerOpen(true)}
+                        onClick={() => {
+                          setInspectorOverride(null);
+                          setMobileDrawerOpen(true);
+                        }}
                         className="lg:hidden inline-flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-xs text-emerald-300"
                       >
-                        <span>Sources ({citations.length})</span>
+                        <span>Sources ({reportCitations.length})</span>
                       </button>
                     )}
                   </div>
@@ -909,21 +929,23 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                   )}
 
                   {/* Interactive Citation Evidence Pills */}
-                  {citations.length > 0 && (
+                  {reportCitations.length > 0 && (
                     <div className="pt-4 border-t border-slate-800/80">
                       <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2.5">
-                        Verified Source Citations (Click to Inspect Primary Filing / XBRL Fact)
+                        Verified Source Citations (Click to Inspect Primary Filing / Live Quote / XBRL)
                       </div>
                       <div className="flex flex-wrap gap-2">
-                        {citations.map((cit, idx) => {
+                        {reportCitations.map((cit, idx) => {
                           const selected =
+                            inspectorOverride === null &&
                             (selectedCitIdx ?? 0) === idx;
                           const style =
-                            cit.type === "numeric"
+                            cit.type === "numeric" || cit.type === "market"
                               ? selected
                                 ? "border-blue-400 bg-blue-500/20 text-blue-100"
                                 : "border-blue-500/25 bg-blue-950/20 text-blue-300 hover:border-blue-400/50"
-                              : cit.type === "sentiment"
+                              : cit.type === "sentiment" ||
+                                cit.type === "insider"
                               ? selected
                                 ? "border-amber-400 bg-amber-500/20 text-amber-100"
                                 : "border-amber-500/25 bg-amber-950/20 text-amber-300 hover:border-amber-400/50"
@@ -936,6 +958,7 @@ export function ResearchTerminal({ initialReport = null }: Props) {
                               key={idx}
                               type="button"
                               onClick={() => {
+                                setInspectorOverride(null);
                                 setSelectedCitIdx(idx);
                                 setMobileDrawerOpen(true);
                               }}
@@ -1007,11 +1030,11 @@ export function ResearchTerminal({ initialReport = null }: Props) {
               </article>
             )}
 
-            {/* Audited Multi-Year XBRL Chart Panel */}
-            <FinancialChart
+            {/* TradingView Live OHLCV + TradingView Studio + SEC XBRL Chart Deck */}
+            <TradingViewChart
               ticker={ticker}
-              rows={financials}
-              loading={finLoading}
+              xbrlRows={financials}
+              xbrlLoading={finLoading}
             />
           </div>
 
@@ -1019,8 +1042,10 @@ export function ResearchTerminal({ initialReport = null }: Props) {
           <div className="hidden lg:block lg:col-span-5 xl:col-span-4 sticky top-20 h-[calc(100vh-6.5rem)]">
             <SourceInspector
               citation={activeCitation}
-              allCitations={citations}
-              selectedIndex={selectedCitIdx ?? (citations.length ? 0 : null)}
+              allCitations={inspectorCitations}
+              selectedIndex={
+                selectedCitIdx ?? (inspectorCitations.length ? 0 : null)
+              }
               onSelectIndex={(i) => setSelectedCitIdx(i)}
             />
           </div>
@@ -1033,8 +1058,10 @@ export function ResearchTerminal({ initialReport = null }: Props) {
           <div className="flex-1 overflow-hidden">
             <SourceInspector
               citation={activeCitation}
-              allCitations={citations}
-              selectedIndex={selectedCitIdx ?? (citations.length ? 0 : null)}
+              allCitations={inspectorCitations}
+              selectedIndex={
+                selectedCitIdx ?? (inspectorCitations.length ? 0 : null)
+              }
               onSelectIndex={(i) => setSelectedCitIdx(i)}
               onCloseMobile={() => setMobileDrawerOpen(false)}
             />
