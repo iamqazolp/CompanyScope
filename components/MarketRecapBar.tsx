@@ -76,7 +76,7 @@ export function MarketRecapBar({ onInspectRecapCitation }: Props) {
                 >
                   <span className="text-slate-400 font-medium">{b.label}</span>
                   <span className="text-slate-100 font-semibold tabular-nums">
-                    {b.price !== null
+                    {typeof b.price === "number"
                       ? b.symbol === "^TNX"
                         ? `${b.price.toFixed(2)}%`
                         : b.price.toLocaleString("en-US", {
@@ -84,7 +84,7 @@ export function MarketRecapBar({ onInspectRecapCitation }: Props) {
                           })
                       : "—"}
                   </span>
-                  {b.change_pct !== null && (
+                  {typeof b.change_pct === "number" && (
                     <span
                       className={`inline-flex items-center tabular-nums ${
                         up ? "text-emerald-400" : "text-rose-400"

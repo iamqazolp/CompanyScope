@@ -1,13 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import {
-  ColorType,
-  CrosshairMode,
-  createChart,
-  type IChartApi,
-  type Time,
-} from "lightweight-charts";
+import type { IChartApi, Time } from "lightweight-charts";
 import {
   Activity,
   ArrowDownRight,
@@ -44,7 +38,6 @@ export function TradingViewChart({
   const [hoveredBar, setHoveredBar] = useState<OhlcvCandle | null>(null);
 
   const candleContainerRef = useRef<HTMLDivElement | null>(null);
-  const tvWidgetContainerRef = useRef<HTMLDivElement | null>(null);
 
   const cleanTicker = ticker.trim().toUpperCase() || "AAPL";
 
@@ -74,152 +67,126 @@ export function TradingViewChart({
     };
   }, [cleanTicker, timeframe]);
 
-  // Render TradingView lightweight-charts candlestick + volume series
+  // Render TradingView lightweight-charts candlestick + volume series (client-only dynamic import)
   useEffect(() => {
     if (viewMode !== "candles") return;
     const container = candleContainerRef.current;
     const candles = chartData?.candles || [];
     if (!container || candles.length === 0) return;
 
-    const chart: IChartApi = createChart(container, {
-      width: container.clientWidth,
-      height: 310,
-      layout: {
-        background: { type: ColorType.Solid, color: "#090e19" },
-        textColor: "#94a3b8",
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
-        fontSize: 11,
-      },
-      grid: {
-        vertLines: { color: "rgba(30, 41, 59, 0.45)" },
-        horzLines: { color: "rgba(30, 41, 59, 0.45)" },
-      },
-      crosshair: {
-        mode: CrosshairMode.Normal,
-      },
-      rightPriceScale: {
-        borderColor: "rgba(51, 65, 85, 0.6)",
-      },
-      timeScale: {
-        borderColor: "rgba(51, 65, 85, 0.6)",
-        timeVisible: Boolean(chartData?.is_intraday),
-        secondsVisible: false,
-      },
-    });
+    let disposed = false;
+    let chart: IChartApi | null = null;
+    let ro: ResizeObserver | null = null;
 
-    const candleSeries = chart.addCandlestickSeries({
-      upColor: "#10b981",
-      downColor: "#f43f5e",
-      borderUpColor: "#10b981",
-      borderDownColor: "#f43f5e",
-      wickUpColor: "#10b981",
-      wickDownColor: "#f43f5e",
-    });
+    import("lightweight-charts").then(({ ColorType, CrosshairMode, createChart }) => {
+      if (disposed || !candleContainerRef.current) return;
+      container.innerHTML = "";
 
-    const volumeSeries = chart.addHistogramSeries({
-      priceFormat: { type: "volume" },
-      priceScaleId: "",
-    });
-    volumeSeries.priceScale().applyOptions({
-      scaleMargins: { top: 0.78, bottom: 0 },
-    });
+      chart = createChart(container, {
+        width: container.clientWidth || 640,
+        height: 310,
+        layout: {
+          background: { type: ColorType.Solid, color: "#090e19" },
+          textColor: "#94a3b8",
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
+          fontSize: 11,
+        },
+        grid: {
+          vertLines: { color: "rgba(30, 41, 59, 0.45)" },
+          horzLines: { color: "rgba(30, 41, 59, 0.45)" },
+        },
+        crosshair: {
+          mode: CrosshairMode.Normal,
+        },
+        rightPriceScale: {
+          borderColor: "rgba(51, 65, 85, 0.6)",
+        },
+        timeScale: {
+          borderColor: "rgba(51, 65, 85, 0.6)",
+          timeVisible: Boolean(chartData?.is_intraday),
+          secondsVisible: false,
+        },
+      });
 
-    candleSeries.setData(
-      candles.map((c) => ({
-        time: c.time as Time,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      }))
-    );
+      const candleSeries = chart.addCandlestickSeries({
+        upColor: "#10b981",
+        downColor: "#f43f5e",
+        borderUpColor: "#10b981",
+        borderDownColor: "#f43f5e",
+        wickUpColor: "#10b981",
+        wickDownColor: "#f43f5e",
+      });
 
-    volumeSeries.setData(
-      candles.map((c) => ({
-        time: c.time as Time,
-        value: c.volume,
-        color:
-          c.close >= c.open
-            ? "rgba(16, 185, 129, 0.28)"
-            : "rgba(244, 63, 94, 0.28)",
-      }))
-    );
+      const volumeSeries = chart.addHistogramSeries({
+        priceFormat: { type: "volume" },
+        priceScaleId: "",
+      });
+      volumeSeries.priceScale().applyOptions({
+        scaleMargins: { top: 0.78, bottom: 0 },
+      });
 
-    chart.timeScale().fitContent();
+      candleSeries.setData(
+        candles.map((c) => ({
+          time: c.time as Time,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        }))
+      );
 
-    const byTime = new Map<string, OhlcvCandle>();
-    for (const c of candles) {
-      byTime.set(String(c.time), c);
-    }
+      volumeSeries.setData(
+        candles.map((c) => ({
+          time: c.time as Time,
+          value: c.volume,
+          color:
+            c.close >= c.open
+              ? "rgba(16, 185, 129, 0.28)"
+              : "rgba(244, 63, 94, 0.28)",
+        }))
+      );
 
-    chart.subscribeCrosshairMove((param) => {
-      if (!param.time) {
-        setHoveredBar(null);
-        return;
+      chart.timeScale().fitContent();
+
+      const byTime = new Map<string, OhlcvCandle>();
+      for (const c of candles) {
+        byTime.set(String(c.time), c);
       }
-      const match = byTime.get(String(param.time));
-      if (match) setHoveredBar(match);
-    });
 
-    const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const w = Math.floor(entry.contentRect.width);
-        if (w > 0) {
-          chart.applyOptions({ width: w });
+      chart.subscribeCrosshairMove((param) => {
+        if (disposed) return;
+        if (!param.time) {
+          setHoveredBar(null);
+          return;
         }
-      }
+        const match = byTime.get(String(param.time));
+        if (match) setHoveredBar(match);
+      });
+
+      ro = new ResizeObserver((entries) => {
+        if (disposed || !chart) return;
+        for (const entry of entries) {
+          const w = Math.floor(entry.contentRect.width);
+          if (w > 0) {
+            chart.applyOptions({ width: w });
+          }
+        }
+      });
+      ro.observe(container);
     });
-    ro.observe(container);
 
     return () => {
-      ro.disconnect();
-      chart.remove();
+      disposed = true;
+      ro?.disconnect();
+      chart?.remove();
     };
   }, [viewMode, chartData]);
 
-  // Mount Official TradingView Advanced Technical Chart widget when in "tradingview_pro" mode
   const tvSymbol =
     chartData?.tradingview_symbol || `NASDAQ:${cleanTicker}`;
-
-  useEffect(() => {
-    if (viewMode !== "tradingview_pro") return;
-    const holder = tvWidgetContainerRef.current;
-    if (!holder) return;
-    holder.innerHTML = "";
-
-    const widgetDiv = document.createElement("div");
-    widgetDiv.className = "tradingview-widget-container__widget";
-    widgetDiv.style.height = "360px";
-    widgetDiv.style.width = "100%";
-    holder.appendChild(widgetDiv);
-
-    const script = document.createElement("script");
-    script.src =
-      "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
-    script.type = "text/javascript";
-    script.async = true;
-    script.innerHTML = JSON.stringify({
-      autosize: true,
-      symbol: tvSymbol,
-      interval: "D",
-      timezone: "Etc/UTC",
-      theme: "dark",
-      style: "1",
-      locale: "en",
-      backgroundColor: "rgba(9, 14, 25, 1)",
-      gridColor: "rgba(30, 41, 59, 0.45)",
-      hide_side_toolbar: false,
-      allow_symbol_change: true,
-      save_image: false,
-      studies: ["STD;RSI"],
-      support_host: "https://www.tradingview.com",
-    });
-    holder.appendChild(script);
-
-    return () => {
-      holder.innerHTML = "";
-    };
-  }, [viewMode, tvSymbol]);
+  const tvIframeUrl = `https://s.tradingview.com/widgetembed/?symbol=${encodeURIComponent(
+    tvSymbol
+  )}&interval=D&theme=dark&style=1&timezone=Etc%2FUTC&studies=%5B%22RSI%40tv-basicstudies%22%5D&hide_side_toolbar=0&allow_symbol_change=1&saveimage=0&locale=en`;
 
   const quote = chartData?.quote;
   const isUp = (quote?.change_pct ?? 0) >= 0;
@@ -448,9 +415,12 @@ export function TradingViewChart({
 
       {viewMode === "tradingview_pro" && (
         <div className="p-2 bg-[#090e19]">
-          <div
-            ref={tvWidgetContainerRef}
-            className="tradingview-widget-container w-full h-[360px] rounded-lg overflow-hidden"
+          <iframe
+            key={tvSymbol}
+            title={`TradingView Advanced Chart ${tvSymbol}`}
+            src={tvIframeUrl}
+            className="w-full h-[360px] rounded-lg border-0 bg-[#090e19]"
+            allowFullScreen
           />
         </div>
       )}
