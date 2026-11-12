@@ -2,6 +2,324 @@ from typing import Any
 
 SHOWCASE_REPORTS: list[dict[str, Any]] = [
     {
+        "slug": "nvda-fy2026-ai-compute-cashflow-audit",
+        "title": "NVIDIA (NVDA) FY2026 AI Data Center Scale, Gross Margin & Free Cash Flow Audit",
+        "category": "Semiconductors · 10-K + XBRL",
+        "question": "Analyze NVIDIA's FY2026 Revenue, Gross Profit, R&D investment, and Free Cash Flow conversion alongside supply-chain and export-control risk disclosures.",
+        "tickers": ["NVDA"],
+        "mode": "multi_agent",
+        "result": {
+            "answer": (
+                "**Executive Summary — NVIDIA Corp. (`NVDA`) FY2026 Financial & Risk Audit**\n\n"
+                "1. **Hyper-Scale Profitability & Cash Conversion (`10-K FY2026` XBRL):**\n"
+                "   - **Total Revenue:** Surged `65.47%` YoY from **$130,497,000,000** ($130.50B in FY2025) to **$215,938,000,000** ($215.94B in FY2026) on Blackwell data-center ramp.\n"
+                "   - **Gross Profit:** Reached **$153,463,000,000** ($153.46B), representing a **`71.07%` GAAP Gross Margin**, while **Net Income** climbed to **$120,067,000,000** ($120.07B).\n"
+                "   - **R&D & Cash Flow:** R&D spend scaled to **$18,497,000,000** ($18.50B), while **Operating Cash Flow** of **$102,718,000,000** ($102.72B) converted into **$96,676,000,000** ($96.68B) of **Free Cash Flow** (`94.12%` OCF-to-FCF conversion).\n\n"
+                "2. **Statutory Supply-Chain & Export Control Risks (`Form 10-K, Item 1A`):**\n"
+                "   - **Foundry & CoWoS Packaging Concentration:** NVIDIA relies on third-party semiconductor foundries and advanced packaging capacity, exposing multi-quarter Blackwell/Rubin delivery schedules to wafer, HBM memory, and CoWoS substrate bottlenecks.\n"
+                "   - **USG Licensing & Geopolitical Controls:** Export licensing restrictions on accelerated computing interconnects and GPUs constrain addressable data-center demand in restricted jurisdictions and heighten custom-ASIC competitive pressure."
+            ),
+            "citations": [
+                {
+                    "type": "numeric",
+                    "ticker": "NVDA",
+                    "year": 2026,
+                    "concept": "Revenues",
+                    "verified_value": 215938000000.0,
+                    "unit": "USD",
+                    "form": "10-K",
+                },
+                {
+                    "type": "numeric",
+                    "ticker": "NVDA",
+                    "year": 2026,
+                    "concept": "GrossProfit",
+                    "verified_value": 153463000000.0,
+                    "unit": "USD",
+                    "form": "10-K",
+                },
+                {
+                    "type": "numeric",
+                    "ticker": "NVDA",
+                    "year": 2026,
+                    "concept": "NetIncomeLoss",
+                    "verified_value": 120067000000.0,
+                    "unit": "USD",
+                    "form": "10-K",
+                },
+                {
+                    "type": "numeric",
+                    "ticker": "NVDA",
+                    "year": 2026,
+                    "concept": "ResearchAndDevelopmentExpense",
+                    "verified_value": 18497000000.0,
+                    "unit": "USD",
+                    "form": "10-K",
+                },
+                {
+                    "type": "numeric",
+                    "ticker": "NVDA",
+                    "year": 2026,
+                    "concept": "FreeCashFlow",
+                    "verified_value": 96676000000.0,
+                    "unit": "USD",
+                    "form": "10-K",
+                },
+            ],
+            "needs_clarification": "",
+            "used_tools": [
+                "get_financial_data",
+                "calculator",
+                "search_filings",
+            ],
+            "sub_agent_reports": [
+                {
+                    "agent": "QUANT_NVDA",
+                    "role": "quant",
+                    "ticker": "NVDA",
+                    "model": "gpt-6-luna",
+                    "tier": "tier2",
+                    "escalated": False,
+                    "escalation_reason": "routine_specialist_workhorse",
+                    "answer": "Retrieved FY2026 XBRL statements: Revenue $215.94B (+65.47% YoY vs FY2025 $130.50B), Gross Profit $153.46B (71.07% margin), Net Income $120.07B, R&D $18.50B, and Free Cash Flow $96.68B.",
+                    "citations_count": 5,
+                    "self_corrections": 0,
+                    "cost_usd": 0.00044,
+                },
+                {
+                    "agent": "QUAL_NVDA",
+                    "role": "qual",
+                    "ticker": "NVDA",
+                    "model": "gpt-6-luna",
+                    "tier": "tier2",
+                    "escalated": False,
+                    "escalation_reason": "routine_specialist_workhorse",
+                    "answer": "Audited FY2026 Form 10-K Item 1A disclosures covering TSMC foundry/packaging concentration, long-term supply purchase obligations, and US export control licensing rules.",
+                    "citations_count": 0,
+                    "self_corrections": 0,
+                    "cost_usd": 0.00049,
+                },
+            ],
+            "self_corrections": 0,
+            "cost_usd": 0.00792,
+            "model": "gpt-6.1-terra",
+            "tier": "tier1",
+            "escalated": False,
+            "tier_breakdown": {
+                "supervisor_model": "gpt-6.1-terra",
+                "tier1_model": "gpt-6.1-terra",
+                "tier2_model": "gpt-6-luna",
+                "tier1_agents": ["SUPERVISOR_SYNTH"],
+                "tier2_agents": ["QUANT_NVDA", "QUAL_NVDA"],
+                "escalated_agents": [],
+            },
+            "latency_ms": 4280,
+        },
+    },
+    {
+        "slug": "jpm-fy2025-banking-revenue-balance-sheet",
+        "title": "JPMorgan Chase (JPM) FY2025 Net Revenue, Earnings & $4.42T Balance Sheet Audit",
+        "category": "Global Banking · 10-K + XBRL",
+        "question": "Audit JPMorgan Chase's FY2025 Total Net Revenue, Net Income, and $4.42T Balance Sheet leverage alongside regulatory capital and credit cycle risks.",
+        "tickers": ["JPM"],
+        "mode": "multi_agent",
+        "result": {
+            "answer": (
+                "**Executive Summary — JPMorgan Chase & Co. (`JPM`) FY2025 Banking & Capital Audit**\n\n"
+                "1. **Net Revenue & Earnings Resilience (`10-K FY2025` XBRL):**\n"
+                "   - **Total Net Revenue (`RevenuesNetOfInterestExpense`):** Expanded `2.75%` YoY from **$177,556,000,000** ($177.56B in FY2024) to **$182,447,000,000** ($182.45B in FY2025) as investment-banking and asset-management fees offset rate normalization.\n"
+                "   - **GAAP Net Income:** Generated **$57,048,000,000** ($57.05B), translating to a **`31.27%` net profit margin** on net revenue.\n"
+                "   - **Balance Sheet Scale:** **Total Assets** grew `10.54%` YoY to **$4,424,900,000,000** ($4.42T) against **Total Liabilities** of **$4,062,462,000,000** ($4.06T), implying **$362.44B** in book equity cushion (`8.19%` equity-to-assets).\n\n"
+                "2. **Credit Provisioning & Basel III Endgame Posture (`Form 10-K`):**\n"
+                "   - Card services charge-offs and commercial real estate office exposure remain the primary credit-quality watchpoints, while excess CET1 capital preserves buyback flexibility pending final US Basel III capital rules."
+            ),
+            "citations": [
+                {
+                    "type": "numeric",
+                    "ticker": "JPM",
+                    "year": 2025,
+                    "concept": "Revenues",
+                    "verified_value": 182447000000.0,
+                    "unit": "USD",
+                    "form": "10-K",
+                },
+                {
+                    "type": "numeric",
+                    "ticker": "JPM",
+                    "year": 2025,
+                    "concept": "NetIncomeLoss",
+                    "verified_value": 57048000000.0,
+                    "unit": "USD",
+                    "form": "10-K",
+                },
+                {
+                    "type": "numeric",
+                    "ticker": "JPM",
+                    "year": 2025,
+                    "concept": "Assets",
+                    "verified_value": 4424900000000.0,
+                    "unit": "USD",
+                    "form": "10-K",
+                },
+                {
+                    "type": "numeric",
+                    "ticker": "JPM",
+                    "year": 2025,
+                    "concept": "Liabilities",
+                    "verified_value": 4062462000000.0,
+                    "unit": "USD",
+                    "form": "10-K",
+                },
+            ],
+            "needs_clarification": "",
+            "used_tools": [
+                "get_financial_data",
+                "calculator",
+                "search_filings",
+            ],
+            "sub_agent_reports": [
+                {
+                    "agent": "QUANT_JPM",
+                    "role": "quant",
+                    "ticker": "JPM",
+                    "model": "gpt-6-luna",
+                    "tier": "tier2",
+                    "escalated": False,
+                    "escalation_reason": "routine_specialist_workhorse",
+                    "answer": "Extracted FY2025 XBRL banking metrics: Total Net Revenue $182.45B (+2.75% YoY), Net Income $57.05B (31.27% net margin), Total Assets $4.425T, and Total Liabilities $4.062T.",
+                    "citations_count": 4,
+                    "self_corrections": 0,
+                    "cost_usd": 0.00039,
+                },
+            ],
+            "self_corrections": 0,
+            "cost_usd": 0.00685,
+            "model": "gpt-6.1-terra",
+            "tier": "tier1",
+            "escalated": False,
+            "tier_breakdown": {
+                "supervisor_model": "gpt-6.1-terra",
+                "tier1_model": "gpt-6.1-terra",
+                "tier2_model": "gpt-6-luna",
+                "tier1_agents": ["SUPERVISOR_SYNTH"],
+                "tier2_agents": ["QUANT_JPM"],
+                "escalated_agents": [],
+            },
+            "latency_ms": 3910,
+        },
+    },
+    {
+        "slug": "nvda-vs-msft-ai-capex-cash-conversion",
+        "title": "NVIDIA vs. Microsoft (NVDA vs MSFT) AI CapEx & Free Cash Flow Comparison",
+        "category": "Cross-Company Peer Compare",
+        "question": "Compare FY2026 Revenue, Operating Income, Operating Cash Flow, and Free Cash Flow conversion between NVIDIA (NVDA) and Microsoft (MSFT).",
+        "tickers": ["NVDA", "MSFT"],
+        "mode": "multi_agent",
+        "result": {
+            "answer": (
+                "**Peer Comparison — NVIDIA (`NVDA`) vs. Microsoft (`MSFT`) FY2026 Cash Conversion**\n\n"
+                "| Metric (`FY2026 10-K XBRL`) | NVIDIA (`NVDA`) | Microsoft (`MSFT`) |\n"
+                "| :--- | :---: | :---: |\n"
+                "| **Revenue** | **$215.94B** (`$215,938M`) | **$331.84B** (`$331,839M`) |\n"
+                "| **Operating Income** | **$130.39B** (`60.38%` margin) | **$155.24B** (`46.78%` margin) |\n"
+                "| **Operating Cash Flow** | **$102.72B** (`$102,718M`) | **$182.94B** (`$182,935M`) |\n"
+                "| **Free Cash Flow** | **$96.68B** (`94.12%` of OCF) | **$66.99B** (`36.62%` of OCF) |\n\n"
+                "**Key Takeaway:** While Microsoft generates **`1.54×`** NVIDIA's top-line revenue and **`1.78×`** its operating cash flow, hyperscale cloud/AI data-center CapEx absorbed **$115.95B** of MSFT's operating cash flow—allowing asset-light **NVIDIA (`$96.68B` FCF)** to surpass **Microsoft (`$66.99B` FCF)** in annual Free Cash Flow by **`+44.32%`**."
+            ),
+            "citations": [
+                {
+                    "type": "numeric",
+                    "ticker": "NVDA",
+                    "year": 2026,
+                    "concept": "Revenues",
+                    "verified_value": 215938000000.0,
+                    "unit": "USD",
+                    "form": "10-K",
+                },
+                {
+                    "type": "numeric",
+                    "ticker": "NVDA",
+                    "year": 2026,
+                    "concept": "FreeCashFlow",
+                    "verified_value": 96676000000.0,
+                    "unit": "USD",
+                    "form": "10-K",
+                },
+                {
+                    "type": "numeric",
+                    "ticker": "MSFT",
+                    "year": 2026,
+                    "concept": "Revenues",
+                    "verified_value": 331839000000.0,
+                    "unit": "USD",
+                    "form": "10-K",
+                },
+                {
+                    "type": "numeric",
+                    "ticker": "MSFT",
+                    "year": 2026,
+                    "concept": "OperatingCashFlow",
+                    "verified_value": 182935000000.0,
+                    "unit": "USD",
+                    "form": "10-K",
+                },
+                {
+                    "type": "numeric",
+                    "ticker": "MSFT",
+                    "year": 2026,
+                    "concept": "FreeCashFlow",
+                    "verified_value": 66987000000.0,
+                    "unit": "USD",
+                    "form": "10-K",
+                },
+            ],
+            "needs_clarification": "",
+            "used_tools": ["get_financial_data", "calculator"],
+            "sub_agent_reports": [
+                {
+                    "agent": "QUANT_NVDA",
+                    "role": "quant",
+                    "ticker": "NVDA",
+                    "model": "gpt-6.1-terra",
+                    "tier": "tier1",
+                    "escalated": True,
+                    "escalation_reason": "multi_ticker_peer_comparison",
+                    "answer": "NVDA FY2026 Revenue $215.94B, Operating Income $130.39B (60.38% margin), OCF $102.72B, FCF $96.68B (94.12% OCF conversion).",
+                    "citations_count": 2,
+                    "self_corrections": 0,
+                    "cost_usd": 0.00412,
+                },
+                {
+                    "agent": "QUANT_MSFT",
+                    "role": "quant",
+                    "ticker": "MSFT",
+                    "model": "gpt-6.1-terra",
+                    "tier": "tier1",
+                    "escalated": True,
+                    "escalation_reason": "multi_ticker_peer_comparison",
+                    "answer": "MSFT FY2026 Revenue $331.84B, Operating Income $155.24B (46.78% margin), OCF $182.94B, FCF $66.99B after $115.95B cloud/AI CapEx.",
+                    "citations_count": 3,
+                    "self_corrections": 0,
+                    "cost_usd": 0.00438,
+                },
+            ],
+            "self_corrections": 0,
+            "cost_usd": 0.01420,
+            "model": "gpt-6.1-terra",
+            "tier": "tier1",
+            "escalated": True,
+            "tier_breakdown": {
+                "supervisor_model": "gpt-6.1-terra",
+                "tier1_model": "gpt-6.1-terra",
+                "tier2_model": "gpt-6-luna",
+                "tier1_agents": ["SUPERVISOR_SYNTH", "QUANT_NVDA", "QUANT_MSFT"],
+                "tier2_agents": [],
+                "escalated_agents": ["QUANT_NVDA", "QUANT_MSFT"],
+            },
+            "latency_ms": 5140,
+        },
+    },
+    {
         "slug": "aapl-fy2025-segment-cashflow-audit",
         "title": "Apple (AAPL) FY2025 Profitability, Segment Revenue & Supply Chain Audit",
         "category": "Single-Ticker Deep Dive",

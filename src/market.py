@@ -147,8 +147,33 @@ def _tv_rec_label(mark: float | None) -> str:
     return "sell"
 
 
+_SECTOR_PEERS: dict[str, list[str]] = {
+    "Electronic Technology": ["NVDA", "AVGO", "AMD", "MU", "AAPL"],
+    "Technology Services": ["MSFT", "GOOGL", "META", "ORCL", "PLTR"],
+    "Finance": ["JPM", "BAC", "GS", "MS", "V"],
+    "Health Technology": ["LLY", "ABBV", "JNJ", "MRK", "PFE"],
+    "Health Services": ["UNH", "CI", "CVS", "ELV"],
+    "Retail Trade": ["AMZN", "WMT", "COST", "HD"],
+    "Consumer Durables": ["TSLA", "NKE", "GM", "F"],
+    "Consumer Non-Durables": ["PG", "KO", "PEP", "PM"],
+    "Consumer Services": ["NFLX", "MCD", "SBUX", "DIS", "BKNG"],
+    "Communications": ["TMUS", "VZ", "T", "CMCSA"],
+    "Energy Minerals": ["XOM", "CVX", "COP", "EOG"],
+    "Producer Manufacturing": ["GE", "CAT", "RTX", "HON", "ETN"],
+    "Transportation": ["UBER", "UNP", "UPS", "FDX"],
+    "Process Industries": ["LIN", "SHW", "APD", "ECL"],
+    "Utilities": ["NEE", "CEG", "SO", "DUK"],
+}
+
+
+def _suggest_sector_peers(clean: str, sector: str = "") -> list[str]:
+    pool = _SECTOR_PEERS.get(sector) or ["NVDA", "MSFT", "JPM", "AMZN"]
+    peers = [p for p in pool if p != clean]
+    return peers[:3]
+
+
 def _fetch_tradingview_equity_snapshot(clean: str) -> dict[str, Any] | None:
-    """Queries TradingView's America Scanner API for live price, multiples, and consensus targets."""
+    """Queries TradingView's America Scanner API for live price, multiples, sector, and consensus targets."""
     cols = [
         "name",
         "description",
@@ -171,6 +196,7 @@ def _fetch_tradingview_equity_snapshot(clean: str) -> dict[str, Any] | None:
         "price_target_high",
         "price_target_low",
         "recommendation_mark",
+        "sector",
     ]
     sym_candidates = [clean]
     if "-" in clean:
@@ -181,6 +207,11 @@ def _fetch_tradingview_equity_snapshot(clean: str) -> dict[str, Any] | None:
             json={
                 "filter": [
                     {"left": "name", "operation": "in_range", "right": sym_candidates},
+                    {
+                        "left": "exchange",
+                        "operation": "in_range",
+                        "right": ["NASDAQ", "NYSE", "AMEX"],
+                    },
                     {"left": "is_primary", "operation": "equal", "right": True},
                 ],
                 "columns": cols,
@@ -230,9 +261,235 @@ def _fetch_tradingview_equity_snapshot(clean: str) -> dict[str, Any] | None:
             "target_high": _raw_num(d[18]),
             "target_low": _raw_num(d[19]),
             "recommendation": _tv_rec_label(_raw_num(d[20])),
+            "sector": str(d[21] or ""),
         }
     except Exception:
         return None
+
+
+def search_market_tickers(query: str, limit: int = 8) -> list[dict[str, Any]]:
+    """
+    Live US equity/ADR/ETF autocomplete across 6,000+ NASDAQ/NYSE/AMEX listings via
+    TradingView's America Scanner API (matching ticker symbol or company name).
+    """
+    q_clean = re.sub(r"[^A-Za-z0-9.\- &]", "", (query or "").strip())
+    if not q_clean:
+        return get_market_movers(limit=limit)
+
+    cache_key = f"search_v1:{q_clean.lower()}:{limit}"
+    cached = get_market_cache(cache_key, ttl_seconds=600)
+    if isinstance(cached, list) and cached:
+        return cached
+
+    q_upper = q_clean.upper()
+    cols = [
+        "name",
+        "description",
+        "exchange",
+        "close",
+        "change",
+        "market_cap_basic",
+        "sector",
+        "type",
+    ]
+    try:
+        r_tv = requests.post(
+            "https://scanner.tradingview.com/america/scan",
+            json={
+                "filter": [
+                    {
+                        "left": "exchange",
+                        "operation": "in_range",
+                        "right": ["NASDAQ", "NYSE", "AMEX"],
+                    },
+                    {"left": "is_primary", "operation": "equal", "right": True},
+                ],
+                "filter2": {
+                    "operator": "or",
+                    "operands": [
+                        {
+                            "operation": {
+                                "operator": "or",
+                                "operands": [
+                                    {
+                                        "expression": {
+                                            "left": "name",
+                                            "operation": "match",
+                                            "right": q_clean,
+                                        }
+                                    },
+                                    {
+                                        "expression": {
+                                            "left": "description",
+                                            "operation": "match",
+                                            "right": q_clean,
+                                        }
+                                    },
+                                ],
+                            }
+                        }
+                    ],
+                },
+                "columns": cols,
+                "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"},
+                "range": [0, max(16, limit * 2)],
+            },
+            headers=_UA_HEADER,
+            timeout=5,
+        )
+        if not r_tv.ok:
+            return []
+        rows = (r_tv.json() or {}).get("data") or []
+        scored: list[tuple[tuple[int, float], dict[str, Any]]] = []
+        seen: set[str] = set()
+        for row in rows:
+            d = row.get("d") or []
+            if len(d) < len(cols):
+                continue
+            raw_sym = str(d[0] or "").upper().strip()
+            edgar_sym = raw_sym.replace(".", "-")
+            if not edgar_sym or len(edgar_sym) > 6 or edgar_sym in seen:
+                continue
+            px = _raw_num(d[3])
+            if px is None:
+                continue
+            seen.add(edgar_sym)
+            chg = _raw_num(d[4])
+            mcap = _raw_num(d[5]) or 0.0
+            exch = str(d[2] or "")
+            tv_sym = str(row.get("s") or f"{exch}:{raw_sym}")
+            rank_tier = (
+                2
+                if edgar_sym == q_upper or raw_sym == q_upper
+                else (1 if edgar_sym.startswith(q_upper) else 0)
+            )
+            scored.append(
+                (
+                    (rank_tier, mcap),
+                    {
+                        "ticker": edgar_sym,
+                        "company_name": str(d[1] or edgar_sym),
+                        "exchange": exch,
+                        "tradingview_symbol": tv_sym,
+                        "price": round(px, 2),
+                        "change_pct": round(chg, 2) if chg is not None else None,
+                        "market_cap": mcap if mcap > 0 else None,
+                        "sector": str(d[6] or ""),
+                    },
+                )
+            )
+        scored.sort(key=lambda item: item[0], reverse=True)
+        out = [item[1] for item in scored[:limit]]
+        if out:
+            set_market_cache(cache_key, out)
+        return out
+    except Exception:
+        return []
+
+
+def get_market_movers(limit: int = 10) -> list[dict[str, Any]]:
+    """
+    Returns today's most actively traded US large-cap equities by dollar volume ($ Value.Traded)
+    across NASDAQ and NYSE, cached for 3 minutes.
+    """
+    cache_key = f"movers_v2:{limit}"
+    cached = get_market_cache(cache_key, ttl_seconds=180)
+    if isinstance(cached, list) and cached:
+        return cached
+
+    cols = [
+        "name",
+        "description",
+        "exchange",
+        "close",
+        "change",
+        "market_cap_basic",
+        "sector",
+        "Value.Traded",
+    ]
+    try:
+        r_tv = requests.post(
+            "https://scanner.tradingview.com/america/scan",
+            json={
+                "filter": [
+                    {
+                        "left": "exchange",
+                        "operation": "in_range",
+                        "right": ["NASDAQ", "NYSE"],
+                    },
+                    {"left": "type", "operation": "equal", "right": "stock"},
+                    {"left": "is_primary", "operation": "equal", "right": True},
+                    {
+                        "left": "market_cap_basic",
+                        "operation": "egreater",
+                        "right": 20000000000,
+                    },
+                    {
+                        "left": "total_revenue_ttm",
+                        "operation": "egreater",
+                        "right": 1000000000,
+                    },
+                ],
+                "columns": cols,
+                "sort": {"sortBy": "Value.Traded", "sortOrder": "desc"},
+                "range": [0, max(limit + 4, 12)],
+            },
+            headers=_UA_HEADER,
+            timeout=5,
+        )
+        if r_tv.ok:
+            rows = (r_tv.json() or {}).get("data") or []
+            movers: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for row in rows:
+                d = row.get("d") or []
+                if len(d) < len(cols):
+                    continue
+                raw_sym = str(d[0] or "").upper().strip()
+                edgar_sym = raw_sym.replace(".", "-")
+                if not edgar_sym or len(edgar_sym) > 6 or edgar_sym in seen:
+                    continue
+                px = _raw_num(d[3])
+                if px is None:
+                    continue
+                seen.add(edgar_sym)
+                chg = _raw_num(d[4])
+                mcap = _raw_num(d[5])
+                exch = str(d[2] or "")
+                movers.append(
+                    {
+                        "ticker": edgar_sym,
+                        "company_name": str(d[1] or edgar_sym),
+                        "exchange": exch,
+                        "tradingview_symbol": str(row.get("s") or f"{exch}:{raw_sym}"),
+                        "price": round(px, 2),
+                        "change_pct": round(chg, 2) if chg is not None else None,
+                        "market_cap": mcap,
+                        "sector": str(d[6] or ""),
+                    }
+                )
+                if len(movers) >= limit:
+                    break
+            if movers:
+                set_market_cache(cache_key, movers)
+                return movers
+    except Exception:
+        pass
+
+    fallback_syms = ["NVDA", "MSFT", "JPM", "LLY", "AMZN", "PLTR", "AVGO", "COST"]
+    return [
+        {
+            "ticker": s,
+            "company_name": s,
+            "exchange": "",
+            "tradingview_symbol": resolve_tradingview_symbol(s),
+            "price": None,
+            "change_pct": None,
+            "market_cap": None,
+            "sector": "",
+        }
+        for s in fallback_syms[:limit]
+    ]
 
 
 def get_live_market_data(ticker: str) -> dict[str, Any]:
@@ -243,7 +500,7 @@ def get_live_market_data(ticker: str) -> dict[str, Any]:
     Cached for 5 minutes in market_cache.
     """
     clean = ticker.upper().strip()
-    cache_key = f"quote_v2:{clean}"
+    cache_key = f"quote_v3:{clean}"
     cached = get_market_cache(cache_key, ttl_seconds=300)
     if isinstance(cached, dict) and cached.get("price") is not None:
         return cached
@@ -260,6 +517,7 @@ def get_live_market_data(ticker: str) -> dict[str, Any]:
     tv_symbol_override = ""
     currency = "USD"
     short_name = clean
+    sector = ""
     market_cap: float | None = None
     enterprise_value: float | None = None
     trailing_pe: float | None = None
@@ -281,6 +539,7 @@ def get_live_market_data(ticker: str) -> dict[str, Any]:
         tv_symbol_override = tv_snap["tv_symbol"]
         short_name = tv_snap["short_name"]
         exchange_code = tv_snap["exchange_code"]
+        sector = tv_snap.get("sector") or ""
         price = tv_snap["price"]
         prev_close = tv_snap["prev_close"]
         change = tv_snap["change"]
@@ -442,6 +701,8 @@ def get_live_market_data(ticker: str) -> dict[str, Any]:
         "ticker": clean,
         "company_name": short_name,
         "exchange": exchange_code,
+        "sector": sector,
+        "suggested_peers": _suggest_sector_peers(clean, sector),
         "tradingview_symbol": tv_symbol,
         "currency": currency,
         "as_of": now_iso,

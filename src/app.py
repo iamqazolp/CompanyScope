@@ -48,8 +48,10 @@ from src.embeddings import get_active_embedding_model_name
 from src.ingest import ingest_company
 from src.market import (
     get_live_market_data,
+    get_market_movers,
     get_market_pulse_and_recap,
     get_ohlcv_chart_data,
+    search_market_tickers,
 )
 from src.multi_agent import (
     classify_needed_specialists,
@@ -57,7 +59,7 @@ from src.multi_agent import (
     run_multi_agent_query,
 )
 from src.showcase import get_showcase_by_slug, list_showcase_summaries
-from src.tools import get_company_financial_summary
+from src.tools import get_company_financial_bundle
 
 GUEST_COOKIE_NAME = "cs_guest"
 
@@ -167,15 +169,16 @@ def _execute_query_dispatch(
     target_ticker: str = (payload.ticker or DEFAULT_TICKER).upper().strip()
     mode = (payload.mode or "single").lower()
     explicit_tickers = [t.upper().strip() for t in (payload.tickers or []) if t.strip()]
+    detected = detect_tickers(
+        payload.question, target_ticker, explicit_tickers or None
+    )
+    primary_ticker = detected[0] if detected else target_ticker
 
     if mode in ("multi_agent", "multi"):
-        resolved_tickers = detect_tickers(
-            payload.question, target_ticker, explicit_tickers or None
-        )
         res = run_multi_agent_query(
             question=payload.question,
-            ticker=target_ticker,
-            tickers=explicit_tickers or None,
+            ticker=primary_ticker,
+            tickers=detected,
             history=payload.history,
             provider=payload.provider,
             model=payload.model,
@@ -183,17 +186,14 @@ def _execute_query_dispatch(
             user_id=payload.user_id,
             event_cb=event_cb,
         )
-        return res, resolved_tickers, "multi_agent"
+        return res, detected, "multi_agent"
 
     if mode == "auto":
-        detected = detect_tickers(
-            payload.question, target_ticker, explicit_tickers or None
-        )
         needed_roles = classify_needed_specialists(payload.question)
         if len(detected) > 1 or explicit_tickers or len(needed_roles) > 1:
             res = run_multi_agent_query(
                 question=payload.question,
-                ticker=target_ticker,
+                ticker=primary_ticker,
                 tickers=detected,
                 history=payload.history,
                 provider=payload.provider,
@@ -206,7 +206,7 @@ def _execute_query_dispatch(
 
     res = process_query(
         question=payload.question,
-        ticker=target_ticker,
+        ticker=primary_ticker,
         history=payload.history,
         provider=payload.provider,
         model=payload.model,
@@ -214,7 +214,7 @@ def _execute_query_dispatch(
         user_id=payload.user_id,
         event_cb=event_cb,
     )
-    return res, [target_ticker], "single"
+    return res, [primary_ticker], "single"
 
 
 router = APIRouter()
@@ -375,8 +375,12 @@ def trigger_ingestion(
 def get_ticker_financials(ticker: str) -> dict[str, Any]:
     try:
         clean_ticker = ticker.upper().strip()
-        rows = get_company_financial_summary(clean_ticker)
-        return {"ticker": clean_ticker, "financials": rows}
+        bundle = get_company_financial_bundle(clean_ticker)
+        return {
+            "ticker": clean_ticker,
+            "financials": bundle.get("annual", []),
+            "quarterly": bundle.get("quarterly", []),
+        }
     except Exception as e:
         return {"error": f"Failed to fetch financial summary: {str(e)}"}
 
@@ -388,6 +392,26 @@ def fetch_daily_market_recap(force: bool = False) -> dict[str, Any]:
         return get_market_pulse_and_recap(force_refresh=force)
     except Exception as e:
         return {"error": f"Failed to fetch market recap: {str(e)}"}
+
+
+@router.get("/market/search")
+def search_tickers_endpoint(q: str = "", limit: int = 8) -> dict[str, Any]:
+    """Zero-quota autocomplete across 6,000+ NASDAQ, NYSE & AMEX companies by symbol or company name."""
+    try:
+        capped = max(1, min(int(limit), 20))
+        return {"query": q, "results": search_market_tickers(q, limit=capped)}
+    except Exception as e:
+        return {"error": f"Failed to search tickers: {str(e)}"}
+
+
+@router.get("/market/movers")
+def fetch_market_movers_endpoint(limit: int = 10) -> dict[str, Any]:
+    """Zero-quota endpoint returning today's highest dollar-volume US large-cap equities."""
+    try:
+        capped = max(1, min(int(limit), 20))
+        return {"movers": get_market_movers(limit=capped)}
+    except Exception as e:
+        return {"error": f"Failed to fetch market movers: {str(e)}"}
 
 
 @router.get("/market/quote/{ticker}")

@@ -51,16 +51,16 @@ QUANT_SYSTEM_PROMPT = """You are the Quantitative XBRL & Live Valuation Sub-Agen
 Your responsibility is to fetch authoritative numeric financial metrics from SEC 10-K filings using `get_financial_data`, fetch live market quotes and valuation multiples using `get_live_market_data`, and perform exact calculations using `calculator`.
 
 Rules:
-- ALWAYS call `get_financial_data` for historical SEC XBRL metrics and `get_live_market_data` when asked about current stock price, Market Cap, P/E, EV/EBITDA, or analyst targets.
+- ALWAYS call `get_financial_data` for historical SEC XBRL metrics (pass `year="latest"` when the user asks for latest/current annual XBRL figures without specifying a calendar year) and `get_live_market_data` when asked about current stock price, Market Cap, P/E, EV/EBITDA, or analyst targets.
 - ALWAYS call `calculator` for any growth rate, difference, margin, yield, or ratio.
-- For XBRL metrics cite `{"type": "numeric", "ticker": "AAPL", "year": 2025, "concept": "Revenues"}`.
-- For live market metrics cite `{"type": "market", "ticker": "AAPL", "concept": "MarketCap"}` (valid concepts: `SpotPrice`, `MarketCap`, `EnterpriseValue`, `TrailingPE`, `ForwardPE`, `EVToEBITDA`, `FiftyTwoWeekHigh`, `FiftyTwoWeekLow`, `AnalystTargetPrice`).
+- For XBRL metrics cite `{"type": "numeric", "ticker": "NVDA", "year": 2026, "concept": "Revenues"}` using the exact 4-digit `period` returned by `get_financial_data`.
+- For live market metrics cite `{"type": "market", "ticker": "NVDA", "concept": "MarketCap"}` (valid concepts: `SpotPrice`, `MarketCap`, `EnterpriseValue`, `TrailingPE`, `ForwardPE`, `EVToEBITDA`, `FiftyTwoWeekHigh`, `FiftyTwoWeekLow`, `AnalystTargetPrice`).
 - Output ONLY a valid JSON object matching this schema:
 {
   "answer": "Detailed quantitative findings with exact USD figures, live multiples, and calculated percentages.",
   "citations": [
-    {"type": "numeric", "ticker": "AAPL", "year": 2025, "concept": "FreeCashFlow"},
-    {"type": "market", "ticker": "AAPL", "concept": "MarketCap"}
+    {"type": "numeric", "ticker": "NVDA", "year": 2026, "concept": "FreeCashFlow"},
+    {"type": "market", "ticker": "NVDA", "concept": "MarketCap"}
   ],
   "needs_clarification": ""
 }
@@ -129,17 +129,61 @@ Rules:
 """
 
 COMMON_COMPANY_MAP = {
-    "APPLE": "AAPL",
-    "MICROSOFT": "MSFT",
     "NVIDIA": "NVDA",
+    "MICROSOFT": "MSFT",
+    "APPLE": "AAPL",
     "ALPHABET": "GOOGL",
     "GOOGLE": "GOOGL",
     "AMAZON": "AMZN",
     "META": "META",
     "TESLA": "TSLA",
-    "NETFLIX": "NFLX",
+    "BROADCOM": "AVGO",
+    "MICRON": "MU",
     "AMD": "AMD",
     "INTEL": "INTC",
+    "PALANTIR": "PLTR",
+    "ORACLE": "ORCL",
+    "SALESFORCE": "CRM",
+    "NETFLIX": "NFLX",
+    "ADOBE": "ADBE",
+    "CROWDSTRIKE": "CRWD",
+    "SERVICENOW": "NOW",
+    "SNOWFLAKE": "SNOW",
+    "COINBASE": "COIN",
+    "UBER": "UBER",
+    "AIRBNB": "ABNB",
+    "JPMORGAN": "JPM",
+    "JP MORGAN": "JPM",
+    "CHASE": "JPM",
+    "BANK OF AMERICA": "BAC",
+    "GOLDMAN SACHS": "GS",
+    "GOLDMAN": "GS",
+    "MORGAN STANLEY": "MS",
+    "WELLS FARGO": "WFC",
+    "CITIGROUP": "C",
+    "BERKSHIRE": "BRK-B",
+    "BLACKROCK": "BLK",
+    "VISA": "V",
+    "MASTERCARD": "MA",
+    "ELI LILLY": "LLY",
+    "LILLY": "LLY",
+    "UNITEDHEALTH": "UNH",
+    "NOVO NORDISK": "NVO",
+    "ABBVIE": "ABBV",
+    "MERCK": "MRK",
+    "PFIZER": "PFE",
+    "WALMART": "WMT",
+    "COSTCO": "COST",
+    "HOME DEPOT": "HD",
+    "DISNEY": "DIS",
+    "NIKE": "NKE",
+    "STARBUCKS": "SBUX",
+    "MCDONALD": "MCD",
+    "EXXON": "XOM",
+    "CHEVRON": "CVX",
+    "BOEING": "BA",
+    "CATERPILLAR": "CAT",
+    "GE AEROSPACE": "GE",
 }
 
 
@@ -156,13 +200,17 @@ def detect_tickers(
 
     q_upper = question.upper()
     for name, sym in COMMON_COMPANY_MAP.items():
-        if re.search(rf"\b{name}\b", q_upper) and sym not in tickers:
+        if re.search(rf"\b{re.escape(name)}\b", q_upper) and sym not in tickers:
             tickers.append(sym)
 
     stopwords = {
         "SEC", "USD", "CEO", "CFO", "AI", "RAG", "XBRL", "MD", "MDA",
         "ITEM", "WHAT", "HOW", "DID", "AND", "THE", "FOR", "FROM", "WITH",
         "VS", "IN", "TO", "OF", "ON", "IS", "ARE", "WAS", "WERE", "GAAP",
+        "YEAR", "FREE", "CASH", "FLOW", "RISK", "RISKS", "NEWS", "LIVE",
+        "FORM", "HIGH", "LOW", "PE", "EV", "YOY", "CAGR", "NYSE", "ETF",
+        "EPS", "ROE", "FCF", "OCF", "CAPEX", "NET", "DEBT", "BUY", "SELL",
+        "HOLD", "TOP", "MOST", "LAST", "NEXT", "PEER", "PEERS", "CAP",
     }
     for match in re.findall(r"\b[A-Z]{2,5}\b", question):
         if match not in stopwords and match not in tickers:
