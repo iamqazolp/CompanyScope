@@ -11,7 +11,7 @@ from src.db import consume_quota, get_quota_status, make_guest_cookie, save_shar
 from src.embeddings import embed_query_cloud, embed_texts_cloud
 from src.guard import verify_citations
 from src.market import resolve_tradingview_symbol
-from src.multi_agent import run_multi_agent_query
+from src.multi_agent import detect_tickers, run_multi_agent_query
 from src.tier_router import (
     escalate_on_guard_failure,
     resolve_single_agent_tier,
@@ -487,3 +487,87 @@ def test_zero_quota_live_market_quote_chart_and_recap_endpoints() -> None:
         r_quota = client.get("/api/quota")
         assert r_quota.status_code == 200
         assert r_quota.json()["remaining"] == 5
+
+
+def test_all_market_search_movers_and_ticker_detection() -> None:
+    assert detect_tickers("What are Palantir's AI risks?", "NVDA") == ["PLTR"]
+    assert detect_tickers(
+        "Compare JPMorgan and Eli Lilly net income growth", "NVDA"
+    ) == ["JPM", "LLY"]
+    assert detect_tickers("Audit Costco free cash flow", "NVDA") == ["COST"]
+
+    fake_search = [
+        {
+            "ticker": "PLTR",
+            "company_name": "Palantir Technologies Inc.",
+            "exchange": "NASDAQ",
+            "tradingview_symbol": "NASDAQ:PLTR",
+            "price": 192.4,
+            "change_pct": 3.45,
+            "market_cap": 438000000000.0,
+            "sector": "Technology Services",
+        }
+    ]
+    fake_movers = [
+        {
+            "ticker": "NVDA",
+            "company_name": "NVIDIA Corporation",
+            "exchange": "NASDAQ",
+            "tradingview_symbol": "NASDAQ:NVDA",
+            "price": 188.6,
+            "change_pct": 2.87,
+            "market_cap": 4590000000000.0,
+            "sector": "Electronic Technology",
+        },
+        {
+            "ticker": "JPM",
+            "company_name": "JPMorgan Chase & Co.",
+            "exchange": "NYSE",
+            "tradingview_symbol": "NYSE:JPM",
+            "price": 294.1,
+            "change_pct": 1.12,
+            "market_cap": 815000000000.0,
+            "sector": "Finance",
+        },
+    ]
+
+    with (
+        patch("src.app.search_market_tickers", return_value=fake_search),
+        patch("src.app.get_market_movers", return_value=fake_movers),
+    ):
+        r_s = client.get("/api/market/search?q=Palantir")
+        assert r_s.status_code == 200
+        assert r_s.json()["results"][0]["ticker"] == "PLTR"
+
+        r_m = client.get("/api/market/movers")
+        assert r_m.status_code == 200
+        assert [m["ticker"] for m in r_m.json()["movers"]] == ["NVDA", "JPM"]
+
+
+def test_guard_accepts_latest_year_and_enriches_actual_fiscal_year() -> None:
+    tool_results: dict[str, Any] = {
+        "fin_nvda": {
+            "ticker": "NVDA",
+            "concept": "FreeCashFlow",
+            "value": 96676000000.0,
+            "unit": "USD",
+            "period": "2026",
+        }
+    }
+    raw_out: dict[str, Any] = {
+        "answer": "NVIDIA generated $96.68B ($96,676,000,000) in Free Cash Flow in FY2026.",
+        "citations": [
+            {
+                "type": "numeric",
+                "ticker": "NVDA",
+                "year": "latest",
+                "concept": "FreeCashFlow",
+            }
+        ],
+        "needs_clarification": "",
+    }
+    verified = verify_citations(raw_out, tool_results)
+    assert verified["answer"].startswith("NVIDIA generated")
+    assert len(verified["citations"]) == 1
+    assert verified["citations"][0]["year"] == 2026
+    assert verified["citations"][0]["verified_value"] == 96676000000.0
