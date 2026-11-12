@@ -149,7 +149,11 @@ def check_citations(
                         or concept in res_concept
                         or res_concept in concept
                     )
-                    if ticker_matches and concept_matches and res_period == year:
+                    year_matches = (
+                        res_period == year
+                        or year.lower() in ("latest", "current", "recent", "")
+                    )
+                    if ticker_matches and concept_matches and year_matches:
                         if (
                             _value_appears_in_answer(
                                 res_data.get("value"), clean_answer_digits
@@ -259,7 +263,18 @@ def _enrich_citation(
                     or concept in res_concept
                     or res_concept in concept
                 )
-                if ticker_ok and concept_ok and res_period == year:
+                year_ok = (
+                    res_period == year
+                    or year.lower() in ("latest", "current", "recent", "")
+                )
+                if ticker_ok and concept_ok and year_ok:
+                    if res_period.isdigit() and year.lower() in (
+                        "latest",
+                        "current",
+                        "recent",
+                        "",
+                    ):
+                        enriched["year"] = int(res_period)
                     enriched.setdefault("verified_value", res_data.get("value"))
                     enriched.setdefault("unit", res_data.get("unit", "USD"))
                     if res_data.get("filing_date"):

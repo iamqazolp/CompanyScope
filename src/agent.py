@@ -226,7 +226,7 @@ TOOLS_LIST: list[dict[str, Any]] = [
                 "properties": {
                     "ticker": {
                         "type": "string",
-                        "description": "The stock ticker symbol, e.g., AAPL",
+                        "description": "The stock ticker symbol, e.g., NVDA, JPM, MSFT, PLTR",
                     },
                     "concept": {
                         "type": "string",
@@ -234,7 +234,7 @@ TOOLS_LIST: list[dict[str, Any]] = [
                     },
                     "year": {
                         "type": "string",
-                        "description": "The year of the financial data, e.g., '2024'",
+                        "description": "The fiscal year of the financial data, e.g., '2025', '2026', or 'latest' for the most recent annual 10-K",
                     },
                 },
                 "required": ["ticker", "concept", "year"],
