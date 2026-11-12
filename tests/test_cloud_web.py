@@ -10,6 +10,7 @@ from src.app import app
 from src.db import consume_quota, get_quota_status, make_guest_cookie, save_shared_report
 from src.embeddings import embed_query_cloud, embed_texts_cloud
 from src.guard import verify_citations
+from src.market import resolve_tradingview_symbol
 from src.multi_agent import run_multi_agent_query
 from src.tier_router import (
     escalate_on_guard_failure,
@@ -344,3 +345,145 @@ def test_multi_agent_uses_luna_subagents_and_terra_synthesizer_with_guard_escala
     assert ("subagent_qual_AAPL_llm", "gpt-6.1-terra") in called_models
     assert ("multi_agent_tier1_synthesizer", "gpt-6.1-terra") in called_models
     assert any(ev.get("type") == "tier_escalation" for ev in events)
+
+
+def test_tradingview_symbol_resolution() -> None:
+    assert resolve_tradingview_symbol("aapl", "NMS") == "NASDAQ:AAPL"
+    assert resolve_tradingview_symbol("JPM", "") == "NYSE:JPM"
+    assert resolve_tradingview_symbol("NVDA", "NGM") == "NASDAQ:NVDA"
+    assert resolve_tradingview_symbol("SPY", "PCX") == "AMEX:SPY"
+
+
+def test_guard_verifies_live_market_and_insider_citations() -> None:
+    tool_results: dict[str, Any] = {
+        "live_1": {
+            "ticker": "AAPL",
+            "as_of": "2026-11-12T08:15:00+00:00",
+            "metrics": {
+                "MarketCap": {"value": 5168942100000.0, "unit": "USD"},
+                "ForwardPE": {"value": 33.72, "unit": "x"},
+                "SpotPrice": {"value": 248.5, "unit": "USD"},
+            },
+        },
+        "ins_1": [
+            {
+                "chunk_id": "AAPL_2026_FORM4_001",
+                "chunk_text": "[SEC Form 4 · 2026-11-04] Insider: Luca Maestri (SVP, CFO) executed Sale (Code S) of 55,000 shares at $246.10 ($13,535,500).",
+                "ticker": "AAPL",
+                "year": 2026,
+                "section": "Form 4 (Insider)",
+                "url": "https://www.sec.gov/Archives/edgar/data/320193/form4.xml",
+            }
+        ],
+    }
+    raw_out: dict[str, Any] = {
+        "answer": (
+            "Apple trades at $248.50 with a $5.17T market cap (33.72x forward P/E), "
+            "while Luca Maestri (SVP, CFO) executed Sale (Code S) of 55,000 shares at $246.10."
+        ),
+        "citations": [
+            {
+                "type": "market",
+                "ticker": "AAPL",
+                "year": 2026,
+                "concept": "MarketCap",
+            },
+            {
+                "type": "market",
+                "ticker": "AAPL",
+                "year": 2026,
+                "concept": "ForwardPE",
+            },
+            {
+                "type": "insider",
+                "ticker": "AAPL",
+                "year": 2026,
+                "section": "Form 4 (Insider)",
+                "chunk_id": "AAPL_2026_FORM4_001",
+                "quote": "Luca Maestri (SVP, CFO) executed Sale (Code S) of 55,000 shares at $246.10",
+            },
+        ],
+        "needs_clarification": "",
+    }
+    verified = verify_citations(raw_out, tool_results)
+    assert verified["answer"].startswith("Apple trades at $248.50")
+    assert len(verified["citations"]) == 3
+    mcap_cit = verified["citations"][0]
+    assert mcap_cit["verified_value"] == 5168942100000.0
+    assert mcap_cit["as_of"] == "2026-11-12T08:15:00+00:00"
+    ins_cit = verified["citations"][2]
+    assert "Luca Maestri" in ins_cit["source_context"]
+    assert ins_cit["source_url"].endswith("form4.xml")
+
+
+def test_zero_quota_live_market_quote_chart_and_recap_endpoints() -> None:
+    fake_quote = {
+        "ticker": "AAPL",
+        "short_name": "Apple Inc.",
+        "tradingview_symbol": "NASDAQ:AAPL",
+        "price": 248.50,
+        "change_1d_pct": 1.24,
+        "market_cap": 3820000000000.0,
+        "forward_pe": 31.4,
+        "as_of": "2026-11-12T08:20:00+00:00",
+        "metrics": {"SpotPrice": {"value": 248.50, "unit": "USD"}},
+    }
+    fake_chart = {
+        "ticker": "AAPL",
+        "tradingview_symbol": "NASDAQ:AAPL",
+        "timeframe": "1M",
+        "interval": "1d",
+        "period_change_pct": 4.15,
+        "candles": [
+            {
+                "time": "2026-11-10",
+                "open": 244.0,
+                "high": 249.0,
+                "low": 243.5,
+                "close": 248.5,
+                "volume": 41200000,
+            }
+        ],
+    }
+    fake_recap = {
+        "as_of": "2026-11-12T08:20:00+00:00",
+        "model": "gpt-6-luna",
+        "benchmarks": [
+            {
+                "symbol": "^GSPC",
+                "label": "S&P 500",
+                "tradingview_symbol": "SP:SPX",
+                "price": 6012.4,
+                "change_1d_pct": 0.62,
+            }
+        ],
+        "headline": "Tech Leads Wall Street Higher as Yields Stabilize",
+        "summary": "Equities advanced on mega-cap semiconductor strength.",
+        "bullets": ["S&P 500 rose 0.62% to 6,012.40."],
+        "citations": [],
+    }
+
+    with (
+        patch("src.app.get_live_market_data", return_value=fake_quote),
+        patch("src.app.get_ohlcv_chart_data", return_value=fake_chart),
+        patch("src.app.get_market_pulse_and_recap", return_value=fake_recap),
+    ):
+        r_quote = client.get("/api/market/quote/AAPL")
+        assert r_quote.status_code == 200
+        assert r_quote.json()["tradingview_symbol"] == "NASDAQ:AAPL"
+        assert r_quote.json()["price"] == 248.50
+
+        r_chart = client.get("/api/market/chart/AAPL?timeframe=1M")
+        assert r_chart.status_code == 200
+        assert len(r_chart.json()["candles"]) == 1
+        assert r_chart.json()["period_change_pct"] == 4.15
+
+        r_recap = client.get("/api/market/recap")
+        assert r_recap.status_code == 200
+        assert r_recap.json()["model"] == "gpt-6-luna"
+        assert r_recap.json()["benchmarks"][0]["label"] == "S&P 500"
+
+        # Verify zero guest quota was consumed by any of the three endpoints
+        r_quota = client.get("/api/quota")
+        assert r_quota.status_code == 200
+        assert r_quota.json()["remaining"] == 5
